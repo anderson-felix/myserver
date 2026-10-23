@@ -18,6 +18,7 @@ export class CaddyProxyService {
   private logs: RingBuffer<string> = new RingBuffer(500)
   private lastSyncAt: number | null = null
   private lastError: string | null = null
+  private cachedAdminReachable: { value: boolean; ts: number } | null = null
 
   constructor(
     private db: AppDatabase,
@@ -29,11 +30,12 @@ export class CaddyProxyService {
   }
 
   public async start(): Promise<void> {
+    this.cachedAdminReachable = null
     if (!binaryPresent('caddy')) {
       throw new Error('Binário caddy.exe não encontrado em bin/win')
     }
 
-    if (await this.isAdminReachable()) {
+    if (await this.isAdminReachable(true)) {
       log.info('Caddy já está rodando com API REST acessível em 127.0.0.1:2019')
       this.running = true
       await this.syncRoutes()
@@ -104,6 +106,7 @@ export class CaddyProxyService {
   }
 
   public async stop(): Promise<void> {
+    this.cachedAdminReachable = null
     if (this.child && this.child.pid) {
       const pid = this.child.pid
       await new Promise<void>((resolve) => {
@@ -114,7 +117,11 @@ export class CaddyProxyService {
     this.running = false
   }
 
-  public async isAdminReachable(): Promise<boolean> {
+  public async isAdminReachable(forceFresh = false): Promise<boolean> {
+    const now = Date.now()
+    if (!forceFresh && this.cachedAdminReachable && now - this.cachedAdminReachable.ts < 10_000) {
+      return this.cachedAdminReachable.value
+    }
     try {
       const ctrl = new AbortController()
       const t = setTimeout(() => ctrl.abort(), 1_500)
@@ -126,8 +133,11 @@ export class CaddyProxyService {
         }
       })
       clearTimeout(t)
-      return res.ok || res.status === 200
+      const ok = res.ok || res.status === 200
+      this.cachedAdminReachable = { value: ok, ts: now }
+      return ok
     } catch {
+      this.cachedAdminReachable = { value: false, ts: now }
       return false
     }
   }
@@ -151,9 +161,10 @@ export class CaddyProxyService {
   }
 
   public async syncRoutes(): Promise<void> {
+    this.cachedAdminReachable = null
     if (!binaryPresent('caddy')) return
 
-    const adminOk = await this.isAdminReachable()
+    const adminOk = await this.isAdminReachable(true)
     if (!adminOk) {
       try {
         await this.start()

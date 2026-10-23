@@ -11,7 +11,7 @@ export interface MetricCardProps {
   badge?: string
 }
 
-export const MetricCard: React.FC<MetricCardProps> = ({
+export const MetricCard: React.FC<MetricCardProps> = React.memo(({
   title,
   value,
   subvalue,
@@ -55,9 +55,6 @@ export const MetricCard: React.FC<MetricCardProps> = ({
 
   return (
     <div className="glass-panel glass-panel-hover rounded-xl p-4 flex flex-col justify-between relative overflow-hidden">
-      {/* Glow subtle gradient */}
-      <div className={`absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl ${toneClasses.bg} pointer-events-none rounded-full blur-2xl`} />
-
       <div className="flex items-center justify-between mb-3 z-10">
         <div className="flex items-center gap-2">
           <div className={`p-2 rounded-lg bg-neutral-900/90 border border-neutral-800 ${toneClasses.text}`}>
@@ -91,4 +88,6 @@ export const MetricCard: React.FC<MetricCardProps> = ({
       </div>
     </div>
   )
-}
+})
+
+MetricCard.displayName = 'MetricCard'

@@ -28,7 +28,110 @@ const SEVERITY_EMOJIS: Record<Severity, string> = {
 }
 
 export class NotificationService {
+  private telegramPollTimer: NodeJS.Timeout | null = null
+  private telegramPolling = false
+  private lastTelegramUpdateId = 0
+
   constructor(private db: AppDatabase) {}
+
+  private recordTestIncident(channel: NotificationChannel, latencyMs: number): void {
+    const incident = this.db.insertIncident({
+      ts: Date.now(),
+      severity: 'success',
+      category: 'test',
+      title: `Canal ${channel.toUpperCase()} Validado e Ativado`,
+      message: `Teste de notificação para o canal ${channel} concluído com sucesso (${latencyMs}ms). O canal foi ativado automaticamente no MyServer.`,
+      projectId: null,
+      delivered: channel
+    })
+    broadcast(IPC.incidentsOnNew, incident)
+  }
+
+  public startTelegramBotPoller(): void {
+    if (this.telegramPollTimer) return
+    log.info('Iniciando Telegram Bot Poller em background (intervalo 5s)...')
+
+    setTimeout(() => {
+      this.pollTelegramUpdates().catch((err) => log.debug('Erro no primeiro poll do Telegram', err))
+    }, 2000)
+
+    this.telegramPollTimer = setInterval(() => {
+      this.pollTelegramUpdates().catch((err) => log.debug('Erro no poll do Telegram', err))
+    }, 5000)
+  }
+
+  public stopTelegramBotPoller(): void {
+    if (this.telegramPollTimer) {
+      clearInterval(this.telegramPollTimer)
+      this.telegramPollTimer = null
+      log.info('Telegram Bot Poller finalizado.')
+    }
+  }
+
+  private async pollTelegramUpdates(): Promise<void> {
+    if (this.telegramPolling) return
+    const token = this.db.getSecret('telegram_bot_token')
+    if (!token || !token.trim()) return
+
+    this.telegramPolling = true
+    try {
+      const offset = this.lastTelegramUpdateId > 0 ? this.lastTelegramUpdateId + 1 : 0
+      const url = `https://api.telegram.org/bot${token.trim()}/getUpdates?offset=${offset}&timeout=0`
+
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 4500)
+      const res = await fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer))
+
+      if (!res.ok) return
+      const data = (await res.json()) as any
+      if (!data.ok || !Array.isArray(data.result) || data.result.length === 0) return
+
+      for (const u of data.result) {
+        if (u.update_id) {
+          this.lastTelegramUpdateId = Math.max(this.lastTelegramUpdateId, u.update_id)
+        }
+        const msg = u.message || u.edited_message || u.channel_post
+        if (!msg || !msg.chat || !msg.chat.id) continue
+
+        const text = typeof msg.text === 'string' ? msg.text.trim().toLowerCase() : ''
+        if (text.startsWith('/start') || text.startsWith('/status')) {
+          const chatId = String(msg.chat.id)
+          const firstName = msg.from?.first_name || msg.chat?.title || 'Usuário'
+          const username = msg.from?.username || msg.chat?.username
+
+          const currentChatId = this.db.getSetting('notifications_telegram_chat_id', '')
+          if (!currentChatId || currentChatId !== chatId) {
+            this.db.setSetting('notifications_telegram_chat_id', chatId)
+            this.db.setSetting('notifications_telegram_enabled', true)
+            log.info(`Telegram Poller: Chat ID auto-detectado via ${text}: ${chatId} (${firstName})`)
+          } else {
+            this.db.setSetting('notifications_telegram_enabled', true)
+          }
+
+          const settings = this.db.getFullSettings()
+          await this.sendTelegram(token.trim(), chatId, {
+            title: 'Bot do MyServer Orchestrator Online!',
+            message: `Olá, ${firstName}! O bot do MyServer Orchestrator está ativo e vinculado a este chat. Todas as notificações e alertas de hardware estão ativados.`,
+            severity: 'success',
+            serverLabel: settings.serverLabel,
+            extraFacts: {
+              'Chat ID': chatId,
+              'Usuário': `@${username || 'sem_username'}`,
+              'Servidor': settings.serverLabel,
+              'Comando': text,
+              'Status': 'Online e Monitorando'
+            }
+          }).catch((err) => log.error('Falha ao responder /start no Telegram:', err))
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        log.debug('Falha no poller do Telegram:', err.message)
+      }
+    } finally {
+      this.telegramPolling = false
+    }
+  }
 
   public async notify(params: {
     severity: Severity
@@ -158,6 +261,7 @@ export class NotificationService {
   public async testChannel(channel: NotificationChannel): Promise<ChannelTestResult> {
     const settings = this.db.getFullSettings()
     log.info(`Testando canal individual: ${channel}`)
+    const startTime = Date.now()
 
     try {
       if (channel === 'discord') {
@@ -170,7 +274,10 @@ export class NotificationService {
           serverLabel: settings.serverLabel,
           extraFacts: { Teste: 'OK', Canal: 'Discord Webhook' }
         })
-        return { configured: true, ok: true, status: 200 }
+        const latencyMs = Date.now() - startTime
+        this.db.setSetting('notifications_discord_enabled', true)
+        this.recordTestIncident('discord', latencyMs)
+        return { configured: true, ok: true, status: 200, latencyMs }
       }
 
       if (channel === 'teams') {
@@ -183,7 +290,10 @@ export class NotificationService {
           serverLabel: settings.serverLabel,
           extraFacts: { Teste: 'OK', Canal: 'MS Teams AdaptiveCard' }
         })
-        return { configured: true, ok: true, status: 200 }
+        const latencyMs = Date.now() - startTime
+        this.db.setSetting('notifications_teams_enabled', true)
+        this.recordTestIncident('teams', latencyMs)
+        return { configured: true, ok: true, status: 200, latencyMs }
       }
 
       if (channel === 'slack') {
@@ -196,7 +306,10 @@ export class NotificationService {
           serverLabel: settings.serverLabel,
           extraFacts: { Teste: 'OK', Canal: 'Slack Block Kit' }
         })
-        return { configured: true, ok: true, status: 200 }
+        const latencyMs = Date.now() - startTime
+        this.db.setSetting('notifications_slack_enabled', true)
+        this.recordTestIncident('slack', latencyMs)
+        return { configured: true, ok: true, status: 200, latencyMs }
       }
 
       if (channel === 'telegram') {
@@ -216,7 +329,10 @@ export class NotificationService {
           serverLabel: settings.serverLabel,
           extraFacts: { Teste: 'OK', Canal: 'Telegram Bot API' }
         })
-        return { configured: true, ok: true, status: 200 }
+        const latencyMs = Date.now() - startTime
+        this.db.setSetting('notifications_telegram_enabled', true)
+        this.recordTestIncident('telegram', latencyMs)
+        return { configured: true, ok: true, status: 200, latencyMs }
       }
 
       throw new Error(`Canal desconhecido: ${channel}`)
@@ -244,8 +360,13 @@ export class NotificationService {
     return { discord, teams, slack, telegram }
   }
 
-  public async detectTelegramChat(botToken: string): Promise<{ chatId: string; username?: string; firstName?: string }> {
-    const token = botToken.trim()
+  public async detectTelegramChat(botTokenInput?: string): Promise<{ chatId: string; username?: string; firstName?: string }> {
+    let token = botTokenInput ? botTokenInput.trim() : ''
+    if (token) {
+      this.db.setSecret('telegram_bot_token', token)
+    } else {
+      token = this.db.getSecret('telegram_bot_token') || ''
+    }
     if (!token) throw new Error('Informe o Bot Token do Telegram antes de detectar o Chat ID')
 
     log.info('Consultando Telegram getUpdates para auto-detecção de Chat ID...')
@@ -276,6 +397,27 @@ export class NotificationService {
         const username = msg.from?.username || msg.chat.username
         const firstName = msg.from?.first_name || msg.chat.title || 'Usuário Telegram'
         log.info(`Chat ID do Telegram detectado com sucesso: ${chatId} (${firstName})`)
+
+        this.db.setSetting('notifications_telegram_chat_id', chatId)
+        this.db.setSetting('notifications_telegram_enabled', true)
+
+        const settings = this.db.getFullSettings()
+        try {
+          await this.sendTelegram(token, chatId, {
+            title: 'Bot Vinculado com Sucesso!',
+            message: `O bot do MyServer Orchestrator foi vinculado a este chat e ativado com sucesso!`,
+            severity: 'success',
+            serverLabel: settings.serverLabel,
+            extraFacts: {
+              'Chat ID': chatId,
+              'Usuário': firstName || username || 'Telegram User',
+              'Status': 'Notificações Ativas'
+            }
+          })
+        } catch (sendErr) {
+          log.warn('Aviso ao enviar confirmação no Telegram pós-detecção:', sendErr)
+        }
+
         return { chatId, username, firstName }
       }
     }

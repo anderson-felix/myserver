@@ -40,41 +40,75 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const [isGuideOpen, setIsGuideOpen] = useState(false)
   const [isJourneyCollapsed, setIsJourneyCollapsed] = useState(false)
 
-  const loadAll = async () => {
+  const loadStaticAndInitial = async () => {
     try {
-      const [t, p, px, tun, inc, s, info] = await Promise.all([
+      const [s, info, inc] = await Promise.all([
+        window.api.getSettings(),
+        window.api.getInfo(),
+        window.api.listIncidents(10)
+      ])
+      setSettings(s)
+      setSysInfo(info)
+      setIncidents(inc)
+    } catch (err) {
+      console.error('Falha ao carregar dados estáticos iniciais:', err)
+    }
+  }
+
+  const pollDynamic = async () => {
+    try {
+      const [t, p, px, tun] = await Promise.all([
         window.api.getTelemetry(),
         window.api.listProjects(),
         window.api.getProxyStatus(),
-        window.api.getTunnelStatus(),
-        window.api.listIncidents(10),
-        window.api.getSettings(),
-        window.api.getInfo()
+        window.api.getTunnelStatus()
       ])
       setTelemetry(t)
       setProjects(p)
       setProxyStatus(px)
       setTunnelStatus(tun)
-      setIncidents(inc)
-      setSettings(s)
-      setSysInfo(info)
     } catch (err) {
-      console.error('Falha ao carregar telemetria:', err)
+      console.error('Falha ao carregar telemetria dinâmica:', err)
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    loadAll()
-    const interval = setInterval(loadAll, 5000)
+    let active = true
+    let timerId: ReturnType<typeof setTimeout> | null = null
+
+    loadStaticAndInitial()
+
+    const runPoll = async () => {
+      if (!active) return
+
+      if (!document.hidden) {
+        await pollDynamic()
+      }
+
+      if (active) {
+        timerId = setTimeout(runPoll, 5000)
+      }
+    }
+
+    runPoll()
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden && active) {
+        pollDynamic()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
 
     const unsubIncidents = window.api.onNewIncident((newInc) => {
       setIncidents((prev) => [newInc, ...prev.slice(0, 9)])
     })
 
     return () => {
-      clearInterval(interval)
+      active = false
+      if (timerId) clearTimeout(timerId)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       unsubIncidents()
     }
   }, [])

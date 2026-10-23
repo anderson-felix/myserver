@@ -35,6 +35,7 @@ let watchdogInstance: WatchdogService | null = null
 let backupInstance: BackupService | null = null
 let processManagerInstance: ProcessManagerService | null = null
 let caddyProxyInstance: CaddyProxyService | null = null
+let notificationsInstance: NotificationService | null = null
 
 async function createWindow(): Promise<BrowserWindow> {
   const win = new BrowserWindow({
@@ -137,6 +138,7 @@ async function cleanupAndExit(): Promise<void> {
   try {
     watchdogInstance?.stop()
     backupInstance?.stopScheduler()
+    notificationsInstance?.stopTelegramBotPoller()
     if (tray) {
       tray.destroy()
       tray = null
@@ -203,6 +205,9 @@ app.whenReady().then(async () => {
   })
 
   const notifications = new NotificationService(db)
+  notificationsInstance = notifications
+  notifications.startTelegramBotPoller()
+
   const watchdog = new WatchdogService(db, notifications)
   const osHardening = new OsHardeningService(db, notifications)
   const processManager = new ProcessManagerService(db, notifications)

@@ -99,6 +99,7 @@ export const api = {
   testAllNotificationChannels: () => invoke<WebhookTestResult>(IPC.notificationsTestAll),
   detectTelegramChat: (botToken?: string) =>
     invoke<{ chatId: string; username?: string; firstName?: string }>(IPC.notificationsDetectTelegramChat, botToken),
+  simulatePowerOutage: () => invoke<{ success: boolean }>(IPC.watchdogSimulatePowerOutage),
   listIncidents: (limit?: number) => invoke<Incident[]>(IPC.incidentsList, limit),
   clearIncidents: () => invoke<void>(IPC.incidentsClear),
   onNewIncident: (cb: (incident: Incident) => void) => onEvent<Incident>(IPC.incidentsOnNew, cb),

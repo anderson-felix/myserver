@@ -58,6 +58,7 @@ export const IPC = {
   incidentsList: 'incidents:list',
   incidentsClear: 'incidents:clear',
   incidentsOnNew: 'incidents:on-new',
+  watchdogSimulatePowerOutage: 'watchdog:simulate-power-outage',
 
   // Backup
   backupRunNow: 'backup:run-now',
@@ -430,15 +431,19 @@ export interface AppSettings {
     discordEnabled: boolean
     discordWebhookSet: boolean
     discordWebhookMasked: string
+    discordWebhook: string
     teamsEnabled: boolean
     teamsWebhookSet: boolean
     teamsWebhookMasked: string
+    teamsWebhook: string
     slackEnabled: boolean
     slackWebhookSet: boolean
     slackWebhookMasked: string
+    slackWebhook: string
     telegramEnabled: boolean
     telegramBotTokenSet: boolean
     telegramBotTokenMasked: string
+    telegramBotToken: string
     telegramChatId: string
   }
   watchdog: {

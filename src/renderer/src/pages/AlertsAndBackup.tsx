@@ -13,7 +13,8 @@ import {
   Search,
   Bot,
   BookOpen,
-  HelpCircle
+  HelpCircle,
+  Zap
 } from 'lucide-react'
 import { Badge } from '../components/Badge'
 import { HelpDrawer } from '../components/HelpDrawer'
@@ -258,6 +259,7 @@ export const AlertsAndBackup: React.FC = () => {
   const [testingAll, setTestingAll] = useState(false)
   const [detectingTelegram, setDetectingTelegram] = useState(false)
   const [savingWebhooks, setSavingWebhooks] = useState(false)
+  const [simulatingPowerOutage, setSimulatingPowerOutage] = useState(false)
 
   // Watchdog Thresholds
   const [cpuTempThreshold, setCpuTempThreshold] = useState(85)
@@ -289,9 +291,12 @@ export const AlertsAndBackup: React.FC = () => {
       setTeamsEnabled(s.notifications.teamsEnabled ?? true)
       setSlackEnabled(s.notifications.slackEnabled ?? true)
       setTelegramEnabled(s.notifications.telegramEnabled ?? true)
-      if (s.notifications.telegramChatId) {
-        setTelegramChatId(s.notifications.telegramChatId)
-      }
+
+      setDiscordWebhook(s.notifications.discordWebhook || '')
+      setTeamsWebhook(s.notifications.teamsWebhook || '')
+      setSlackWebhook(s.notifications.slackWebhook || '')
+      setTelegramBotToken(s.notifications.telegramBotToken || '')
+      setTelegramChatId(s.notifications.telegramChatId || '')
 
       setCpuTempThreshold(s.watchdog.cpuTempThreshold)
       setRamThresholdPercent(s.watchdog.ramThresholdPercent)
@@ -305,6 +310,27 @@ export const AlertsAndBackup: React.FC = () => {
       setS3Enabled(s.backup.s3.enabled)
     } catch (err) {
       console.error('Falha ao carregar configurações de alertas e backup:', err)
+    }
+  }
+
+  const persistCurrentNotifications = async (overrides?: Partial<AppSettings['notifications']>) => {
+    try {
+      await window.api.updateSettings({
+        notifications: {
+          desktop: settings?.notifications.desktop ?? true,
+          discordEnabled: overrides?.discordEnabled ?? discordEnabled,
+          teamsEnabled: overrides?.teamsEnabled ?? teamsEnabled,
+          slackEnabled: overrides?.slackEnabled ?? slackEnabled,
+          telegramEnabled: overrides?.telegramEnabled ?? telegramEnabled,
+          discordWebhook: overrides?.discordWebhook !== undefined ? overrides.discordWebhook : (discordWebhook.trim() || null),
+          teamsWebhook: overrides?.teamsWebhook !== undefined ? overrides.teamsWebhook : (teamsWebhook.trim() || null),
+          slackWebhook: overrides?.slackWebhook !== undefined ? overrides.slackWebhook : (slackWebhook.trim() || null),
+          telegramBotToken: overrides?.telegramBotToken !== undefined ? overrides.telegramBotToken : (telegramBotToken.trim() || null),
+          telegramChatId: overrides?.telegramChatId !== undefined ? overrides.telegramChatId : telegramChatId.trim()
+        }
+      })
+    } catch (err) {
+      console.error('Falha no auto-save de notificações:', err)
     }
   }
 
@@ -333,7 +359,11 @@ export const AlertsAndBackup: React.FC = () => {
           teamsEnabled,
           slackEnabled,
           telegramEnabled,
-          telegramChatId: telegramChatId.trim() || undefined
+          discordWebhook: discordWebhook.trim() || null,
+          teamsWebhook: teamsWebhook.trim() || null,
+          slackWebhook: slackWebhook.trim() || null,
+          telegramBotToken: telegramBotToken.trim() || null,
+          telegramChatId: telegramChatId.trim()
         },
         watchdog: {
           cpuTempThreshold: Number(cpuTempThreshold),
@@ -341,26 +371,10 @@ export const AlertsAndBackup: React.FC = () => {
           batteryCriticalPercent: Number(batteryCriticalPercent)
         }
       }
-      if (discordWebhook.trim()) {
-        updatePayload.notifications.discordWebhook = discordWebhook.trim()
-      }
-      if (teamsWebhook.trim()) {
-        updatePayload.notifications.teamsWebhook = teamsWebhook.trim()
-      }
-      if (slackWebhook.trim()) {
-        updatePayload.notifications.slackWebhook = slackWebhook.trim()
-      }
-      if (telegramBotToken.trim()) {
-        updatePayload.notifications.telegramBotToken = telegramBotToken.trim()
-      }
 
       await window.api.updateSettings(updatePayload)
-      setDiscordWebhook('')
-      setTeamsWebhook('')
-      setSlackWebhook('')
-      setTelegramBotToken('')
       alert('Configurações de alerta salvas com sucesso!')
-      loadData()
+      await loadData()
     } catch (err) {
       alert(`Erro ao salvar: ${(err as Error).message}`)
     } finally {
@@ -371,8 +385,17 @@ export const AlertsAndBackup: React.FC = () => {
   const handleTestChannel = async (channel: NotificationChannel) => {
     setTestingChannel(channel)
     try {
+      // Salva os dados atuais preenchidos na tela antes do teste
+      await persistCurrentNotifications()
       const res = await window.api.testNotificationChannel(channel)
       setChannelTestStatus((prev) => ({ ...prev, [channel]: res }))
+      if (res.ok) {
+        if (channel === 'discord') setDiscordEnabled(true)
+        if (channel === 'teams') setTeamsEnabled(true)
+        if (channel === 'slack') setSlackEnabled(true)
+        if (channel === 'telegram') setTelegramEnabled(true)
+        await loadData()
+      }
     } catch (err) {
       setChannelTestStatus((prev) => ({
         ...prev,
@@ -386,8 +409,29 @@ export const AlertsAndBackup: React.FC = () => {
   const handleTestAllChannels = async () => {
     setTestingAll(true)
     try {
+      await persistCurrentNotifications()
       const res = await window.api.testAllNotificationChannels()
       setChannelTestStatus(res as unknown as Record<string, ChannelTestResult | null>)
+      let anySuccess = false
+      if (res.discord?.ok) {
+        setDiscordEnabled(true)
+        anySuccess = true
+      }
+      if (res.teams?.ok) {
+        setTeamsEnabled(true)
+        anySuccess = true
+      }
+      if (res.slack?.ok) {
+        setSlackEnabled(true)
+        anySuccess = true
+      }
+      if (res.telegram?.ok) {
+        setTelegramEnabled(true)
+        anySuccess = true
+      }
+      if (anySuccess) {
+        await loadData()
+      }
     } catch (err) {
       alert(`Falha no teste geral: ${(err as Error).message}`)
     } finally {
@@ -400,13 +444,29 @@ export const AlertsAndBackup: React.FC = () => {
     try {
       const res = await window.api.detectTelegramChat(telegramBotToken.trim() || undefined)
       setTelegramChatId(res.chatId)
-      alert(`Chat ID detectado com sucesso!\nID: ${res.chatId}\nUsuário: ${res.firstName || ''} (@${res.username || 'sem_username'})`)
+      setTelegramEnabled(true)
+      alert(`Chat ID detectado com sucesso!\nID: ${res.chatId}\nUsuário: ${res.firstName || ''} (@${res.username || 'sem_username'})\n\nO bot foi vinculado e o canal Telegram foi ativado com sucesso!`)
+      await loadData()
     } catch (err) {
       alert(`Não foi possível detectar o Chat ID:\n${(err as Error).message}\n\nDica: Abra seu bot no Telegram e envie uma mensagem (ou comando /start) primeiro!`)
     } finally {
       setDetectingTelegram(false)
     }
   }
+
+  const handleSimulatePowerOutage = async () => {
+    setSimulatingPowerOutage(true)
+    try {
+      await persistCurrentNotifications()
+      await window.api.simulatePowerOutage()
+      alert('Simulação de queda de energia disparada com sucesso!\nO alerta de ativação do No-Break Nativo foi emitido para todos os seus canais configurados.')
+    } catch (err) {
+      alert(`Falha ao simular queda de energia: ${(err as Error).message}`)
+    } finally {
+      setSimulatingPowerOutage(false)
+    }
+  }
+
 
   const handleSaveS3 = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -510,15 +570,28 @@ export const AlertsAndBackup: React.FC = () => {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleTestAllChannels}
-            disabled={testingAll}
-            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
-          >
-            <Send size={14} />
-            <span>{testingAll ? 'Testando Canais...' : 'Testar Todos os Canais Ativos'}</span>
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleSimulatePowerOutage}
+              disabled={simulatingPowerOutage}
+              className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-amber-600/20 disabled:opacity-50"
+              title="Simula a perda instantânea de energia elétrica para testar a notificação do No-Break nos seus canais"
+            >
+              <Zap size={14} />
+              <span>{simulatingPowerOutage ? 'Simulando...' : 'Simular Queda de Energia (Teste No-Break)'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleTestAllChannels}
+              disabled={testingAll}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
+            >
+              <Send size={14} />
+              <span>{testingAll ? 'Testando Canais...' : 'Testar Todos os Canais Ativos'}</span>
+            </button>
+          </div>
         </div>
 
         <form onSubmit={handleSaveWebhooks} className="space-y-5">
@@ -551,7 +624,11 @@ export const AlertsAndBackup: React.FC = () => {
                     <input
                       type="checkbox"
                       checked={discordEnabled}
-                      onChange={(e) => setDiscordEnabled(e.target.checked)}
+                      onChange={(e) => {
+                        const val = e.target.checked
+                        setDiscordEnabled(val)
+                        persistCurrentNotifications({ discordEnabled: val })
+                      }}
                       className="rounded bg-neutral-900 border-neutral-700 text-indigo-500 focus:ring-0"
                     />
                     <span>Ativo</span>
@@ -570,6 +647,7 @@ export const AlertsAndBackup: React.FC = () => {
                   type="url"
                   value={discordWebhook}
                   onChange={(e) => setDiscordWebhook(e.target.value)}
+                  onBlur={() => persistCurrentNotifications()}
                   placeholder="https://discord.com/api/webhooks/..."
                   className="w-full px-3 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-white text-xs font-mono focus:border-indigo-500 focus:outline-none"
                 />
@@ -628,7 +706,11 @@ export const AlertsAndBackup: React.FC = () => {
                     <input
                       type="checkbox"
                       checked={teamsEnabled}
-                      onChange={(e) => setTeamsEnabled(e.target.checked)}
+                      onChange={(e) => {
+                        const val = e.target.checked
+                        setTeamsEnabled(val)
+                        persistCurrentNotifications({ teamsEnabled: val })
+                      }}
                       className="rounded bg-neutral-900 border-neutral-700 text-blue-500 focus:ring-0"
                     />
                     <span>Ativo</span>
@@ -647,6 +729,7 @@ export const AlertsAndBackup: React.FC = () => {
                   type="url"
                   value={teamsWebhook}
                   onChange={(e) => setTeamsWebhook(e.target.value)}
+                  onBlur={() => persistCurrentNotifications()}
                   placeholder="https://<tenant>.webhook.office.com/..."
                   className="w-full px-3 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-white text-xs font-mono focus:border-blue-500 focus:outline-none"
                 />
@@ -705,7 +788,11 @@ export const AlertsAndBackup: React.FC = () => {
                     <input
                       type="checkbox"
                       checked={slackEnabled}
-                      onChange={(e) => setSlackEnabled(e.target.checked)}
+                      onChange={(e) => {
+                        const val = e.target.checked
+                        setSlackEnabled(val)
+                        persistCurrentNotifications({ slackEnabled: val })
+                      }}
                       className="rounded bg-neutral-900 border-neutral-700 text-amber-500 focus:ring-0"
                     />
                     <span>Ativo</span>
@@ -724,6 +811,7 @@ export const AlertsAndBackup: React.FC = () => {
                   type="url"
                   value={slackWebhook}
                   onChange={(e) => setSlackWebhook(e.target.value)}
+                  onBlur={() => persistCurrentNotifications()}
                   placeholder="https://hooks.slack.com/services/T.../B.../..."
                   className="w-full px-3 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-white text-xs font-mono focus:border-amber-500 focus:outline-none"
                 />
@@ -782,7 +870,11 @@ export const AlertsAndBackup: React.FC = () => {
                     <input
                       type="checkbox"
                       checked={telegramEnabled}
-                      onChange={(e) => setTelegramEnabled(e.target.checked)}
+                      onChange={(e) => {
+                        const val = e.target.checked
+                        setTelegramEnabled(val)
+                        persistCurrentNotifications({ telegramEnabled: val })
+                      }}
                       className="rounded bg-neutral-900 border-neutral-700 text-sky-500 focus:ring-0"
                     />
                     <span>Ativo</span>
@@ -801,6 +893,7 @@ export const AlertsAndBackup: React.FC = () => {
                   type="password"
                   value={telegramBotToken}
                   onChange={(e) => setTelegramBotToken(e.target.value)}
+                  onBlur={() => persistCurrentNotifications()}
                   placeholder={settings?.notifications.telegramBotTokenSet ? '•••••••• (Manter atual)' : '123456789:ABCDefGhIJKlmNo...'}
                   className="w-full px-3 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-white text-xs font-mono focus:border-sky-500 focus:outline-none"
                 />
@@ -813,6 +906,7 @@ export const AlertsAndBackup: React.FC = () => {
                     type="text"
                     value={telegramChatId}
                     onChange={(e) => setTelegramChatId(e.target.value)}
+                    onBlur={() => persistCurrentNotifications()}
                     placeholder="ex: 123456789 ou -100123456"
                     className="flex-1 px-3 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-white text-xs font-mono focus:border-sky-500 focus:outline-none"
                   />

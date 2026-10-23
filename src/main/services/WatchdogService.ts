@@ -1,3 +1,4 @@
+import { powerMonitor } from 'electron'
 import si from 'systeminformation'
 import { createLogger } from '../utils/logger'
 import { isAdmin, runPowerShell } from '../utils/shell'
@@ -22,9 +23,40 @@ export class WatchdogService {
 
   // Cache de telemetria para chamadas rápidas
   private cachedTelemetry: Telemetry | null = null
+  private collectPromise: Promise<Telemetry> | null = null
   private lastNetworkRx = 0
   private lastNetworkTx = 0
   private lastNetworkTs = 0
+
+  // Dados Estáticos (coleta única na inicialização)
+  private staticHostInfo: {
+    cpuData: { manufacturer: string; brand: string; speed: number; cores: number; physicalCores: number }
+    osData: { hostname: string; distro: string; release: string; arch: string }
+    isElevated: boolean
+  } | null = null
+
+  // Dados Lentos (atualizados a cada 60s)
+  private cachedDisks: DiskInfo[] = []
+  private cachedActiveIface: si.Systeminformation.NetworkInterfacesData | null = null
+  private lastSlowDataTs = 0
+
+  // Sensor Térmico WMI (teste único se não suportado, ou no máximo a cada 60s)
+  private wmiTempSupported: boolean | null = null
+  private lastTempValue: number | null = null
+  private lastTempCheckTs = 0
+
+  // Controle de frequência de medição de processos (a cada 30s)
+  private lastProcessCheckTs = 0
+
+  private onBatteryHandler = () => {
+    log.warn('powerMonitor: Evento nativo on-battery disparado pelo SO Windows!')
+    this.handlePowerEvent(false).catch((err) => log.error('Erro ao processar on-battery:', err))
+  }
+
+  private onAcHandler = () => {
+    log.info('powerMonitor: Evento nativo on-ac disparado pelo SO Windows!')
+    this.handlePowerEvent(true).catch((err) => log.error('Erro ao processar on-ac:', err))
+  }
 
   constructor(
     private db: AppDatabase,
@@ -39,11 +71,20 @@ export class WatchdogService {
     if (this.running) return
     this.running = true
     log.info('Iniciando loop do Watchdog (intervalo 15s)...')
+
+    try {
+      powerMonitor.on('on-battery', this.onBatteryHandler)
+      powerMonitor.on('on-ac', this.onAcHandler)
+      log.info('powerMonitor: Listeners nativos de hardware registrados com sucesso.')
+    } catch (err) {
+      log.warn('Falha ao registrar listeners nativos do powerMonitor:', err)
+    }
+
     // Coleta inicial
     this.tick().catch((err) => log.error('Erro no primeiro tick do Watchdog', err))
     this.timer = setInterval(() => {
       this.tick().catch((err) => log.error('Erro no tick do Watchdog', err))
-    }, 15_000)
+    }, 10_000)
   }
 
   public stop(): void {
@@ -51,14 +92,25 @@ export class WatchdogService {
       clearInterval(this.timer)
       this.timer = null
     }
+    try {
+      powerMonitor.removeListener('on-battery', this.onBatteryHandler)
+      powerMonitor.removeListener('on-ac', this.onAcHandler)
+    } catch {
+      /* ignore */
+    }
     this.running = false
   }
 
   public async getTelemetry(): Promise<Telemetry> {
-    if (this.cachedTelemetry && Date.now() - this.cachedTelemetry.timestamp < 4_000) {
+    if (this.cachedTelemetry) {
       return this.cachedTelemetry
     }
-    return this.collectTelemetry()
+    if (!this.collectPromise) {
+      this.collectPromise = this.collectTelemetry().finally(() => {
+        this.collectPromise = null
+      })
+    }
+    return this.collectPromise
   }
 
   private async tick(): Promise<void> {
@@ -80,25 +132,56 @@ export class WatchdogService {
     }
   }
 
+  private async getStaticHostInfo() {
+    if (this.staticHostInfo) return this.staticHostInfo
+    const [cpuData, osData, isElevated] = await Promise.all([
+      si.cpu().catch(() => ({ manufacturer: '', brand: 'CPU', speed: 0, cores: 1, physicalCores: 1 })),
+      si.osInfo().catch(() => ({ hostname: 'localhost', distro: 'Windows', release: '', arch: 'x64' })),
+      isAdmin().catch(() => false)
+    ])
+    this.staticHostInfo = { cpuData, osData, isElevated }
+    return this.staticHostInfo
+  }
+
   private async collectTelemetry(): Promise<Telemetry> {
     const now = Date.now()
-    const [cpuData, currentLoad, temp, mem, disks, ifaces, netStats, batt, osData] = await Promise.all([
-      si.cpu().catch(() => ({ manufacturer: '', brand: 'CPU', speed: 0, cores: 1, physicalCores: 1 })),
+
+    // 1. Dados Estáticos (CPU e SO em cache O(1))
+    const { cpuData, osData, isElevated } = await this.getStaticHostInfo()
+
+    // 2. Dados Lentos (Disco e Interfaces a cada 60s)
+    if (now - this.lastSlowDataTs >= 60_000 || this.cachedDisks.length === 0) {
+      const [disks, ifaces] = await Promise.all([
+        si.fsSize().catch(() => [] as si.Systeminformation.FsSizeData[]),
+        si.networkInterfaces().catch(() => [] as si.Systeminformation.NetworkInterfacesData[])
+      ])
+      this.cachedDisks = disks.map((d) => ({
+        fs: d.fs,
+        mount: d.mount,
+        type: d.type,
+        size: d.size,
+        used: d.used,
+        percent: Math.round(d.use)
+      }))
+      this.cachedActiveIface = Array.isArray(ifaces)
+        ? ifaces.find((i) => i.ip4 && !i.internal && i.operstate === 'up') || ifaces[0] || null
+        : null
+      this.lastSlowDataTs = now
+    }
+
+    // 3. Dados Rápidos (Carga, Memória, Rede e Bateria)
+    const [currentLoad, temp, mem, netStats, batt] = await Promise.all([
       si.currentLoad().catch(() => ({ currentLoad: 0, cpus: [] })),
       si.cpuTemperature().catch(() => ({ main: null, cores: [], max: null })),
       si.mem().catch(() => ({ total: 1, used: 0, available: 1, swaptotal: 0, swapused: 0 })),
-      si.fsSize().catch(() => [] as si.Systeminformation.FsSizeData[]),
-      si.networkInterfaces().catch(() => [] as si.Systeminformation.NetworkInterfacesData[]),
       si.networkStats().catch(() => [] as si.Systeminformation.NetworkStatsData[]),
-      si.battery().catch(() => ({ hasBattery: false, isCharging: false, acConnected: true, percent: 100, timeRemaining: null, cycleCount: null })),
-      si.osInfo().catch(() => ({ hostname: 'localhost', distro: 'Windows', release: '', arch: 'x64' }))
+      si.battery().catch(() => ({ hasBattery: false, isCharging: false, acConnected: true, percent: 100, timeRemaining: null, cycleCount: null }))
     ])
 
-    const isElevated = await isAdmin()
     const cpuTemp = await this.resolveCpuTemp(temp)
 
     // Interface de rede ativa principal
-    const activeIface = Array.isArray(ifaces) ? ifaces.find((i) => i.ip4 && !i.internal && i.operstate === 'up') || ifaces[0] : null
+    const activeIface = this.cachedActiveIface
     const netStat = Array.isArray(netStats) ? netStats.find((s) => s.iface === activeIface?.iface) || netStats[0] : null
 
     let rxSec = 0
@@ -129,20 +212,33 @@ export class WatchdogService {
         }
       : null
 
-    const diskInfos: DiskInfo[] = disks.map((d) => ({
-      fs: d.fs,
-      mount: d.mount,
-      type: d.type,
-      size: d.size,
-      used: d.used,
-      percent: Math.round(d.use)
-    }))
+    const diskInfos: DiskInfo[] = this.cachedDisks
+
+    const onBatteryOs = powerMonitor.isOnBatteryPower()
+    const acConnected = onBatteryOs ? false : (batt.acConnected ?? true)
+    const hasBattery = Boolean(batt.hasBattery || onBatteryOs)
+
+    let batteryPercent = batt.percent
+    if (hasBattery && (!batteryPercent || batteryPercent <= 0)) {
+      try {
+        const psRes = await runPowerShell(
+          '(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue).EstimatedChargeRemaining',
+          1_500
+        )
+        const parsed = parseInt(psRes.stdout.trim(), 10)
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 100) {
+          batteryPercent = parsed
+        }
+      } catch {
+        /* fallback silencioso */
+      }
+    }
 
     const battery: BatteryInfo = {
-      hasBattery: batt.hasBattery,
-      percent: batt.percent,
-      isCharging: batt.isCharging,
-      acConnected: batt.acConnected,
+      hasBattery,
+      percent: batteryPercent,
+      isCharging: onBatteryOs ? false : batt.isCharging,
+      acConnected,
       timeRemaining: batt.timeRemaining || null,
       cycleCount: (batt as any).cycleCount || null,
       healthPercent: (batt as any).maxCapacity && (batt as any).designedCapacity
@@ -187,41 +283,73 @@ export class WatchdogService {
     return telemetry
   }
 
-  private async checkBattery(battery: BatteryInfo, settings: ReturnType<AppDatabase['getFullSettings']>): Promise<void> {
-    if (!battery.hasBattery) return
+  public async handlePowerEvent(acConnected: boolean, forceTest = false): Promise<void> {
+    if (!forceTest && this.prevAcConnected === acConnected) {
+      return
+    }
 
-    // Transição 1: Queda de energia
-    if (this.prevAcConnected === true && battery.acConnected === false) {
-      log.warn(`Queda de energia detectada! Bateria em ${battery.percent}%`)
+    let percent = this.cachedTelemetry?.battery?.percent ?? 100
+    try {
+      const batt = await si.battery().catch(() => null)
+      if (batt && batt.percent > 0) {
+        percent = batt.percent
+      } else {
+        const psRes = await runPowerShell(
+          '(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue).EstimatedChargeRemaining',
+          1_500
+        )
+        const parsed = parseInt(psRes.stdout.trim(), 10)
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 100) {
+          percent = parsed
+        }
+      }
+    } catch {
+      /* fallback */
+    }
+
+    if (acConnected === false) {
+      this.prevAcConnected = false
+      log.warn(`Queda de energia detectada (Modo No-Break Nativo)! Bateria estimada: ${percent}%`)
+
       await this.notifications.notify({
         severity: 'warning',
         category: 'power',
-        title: 'Queda de Energia Elétrica!',
-        message: `Servidor operando no modo No-Break (bateria). Carga restante: ${battery.percent}%.`,
+        title: 'Queda de Energia Elétrica - No-Break Nativo Ativado!',
+        message: `Queda no fornecimento de energia elétrica detectada! O servidor agora está operando no modo No-Break nativo (bateria). Carga atual: ${percent}%.`,
         extraFacts: {
-          Bateria: `${battery.percent}%`,
+          Bateria: `${percent}%`,
           Status: 'Desconectado da rede elétrica',
-          'Tempo Estimado': battery.timeRemaining ? `${battery.timeRemaining} min` : 'Calculando...'
+          Modo: 'No-Break Nativo (Bateria)',
+          Origem: forceTest ? 'Simulação de Teste Manual' : 'powerMonitor (Windows Kernel)'
         }
       })
-    }
+    } else {
+      this.prevAcConnected = true
+      this.lastCriticalShutdownTriggered = false
+      log.info(`Energia elétrica restabelecida! Bateria estimada: ${percent}%`)
 
-    // Transição 2: Retorno de energia
-    if (this.prevAcConnected === false && battery.acConnected === true) {
-      log.info(`Energia elétrica restabelecida! Bateria em ${battery.percent}%`)
       await this.notifications.notify({
         severity: 'success',
         category: 'power',
         title: 'Energia Elétrica Restabelecida',
-        message: `O fornecimento elétrico foi normalizado. A bateria está recarregando (${battery.percent}%).`,
+        message: `O fornecimento elétrico foi restabelecido! A fonte de alimentação AC está conectada e a bateria está recarregando (${percent}%).`,
         extraFacts: {
-          Bateria: `${battery.percent}%`,
-          Status: battery.isCharging ? 'Carregando' : 'Conectado à tomada'
+          Bateria: `${percent}%`,
+          Status: 'Conectado à tomada (AC)',
+          Modo: 'Rede Elétrica Normal',
+          Origem: forceTest ? 'Simulação de Teste Manual' : 'powerMonitor (Windows Kernel)'
         }
       })
     }
+  }
 
-    this.prevAcConnected = battery.acConnected
+  private async checkBattery(battery: BatteryInfo, settings: ReturnType<AppDatabase['getFullSettings']>): Promise<void> {
+    if (!battery.hasBattery) return
+
+    // Sincroniza transição via handlePowerEvent
+    if (this.prevAcConnected !== battery.acConnected) {
+      await this.handlePowerEvent(battery.acConnected)
+    }
 
     // Transição 3: Bateria Crítica (≤ limiar)
     const critLimit = settings.watchdog.batteryCriticalPercent || 15
@@ -312,7 +440,19 @@ export class WatchdogService {
       return Math.round(siTemp.max)
     }
 
-    // Fallback WMI via PowerShell (MSAcpi_ThermalZoneTemperature)
+    // Se já foi testado e não é suportado pelo hardware, nunca executa PowerShell
+    if (this.wmiTempSupported === false) {
+      return null
+    }
+
+    const now = Date.now()
+    // Se for suportado, consulta no máximo a cada 60s reutilizando o valor intermediário
+    if (this.wmiTempSupported === true && now - this.lastTempCheckTs < 60_000) {
+      return this.lastTempValue
+    }
+
+    // Teste inicial ou renovação a cada 60 segundos
+    this.lastTempCheckTs = now
     try {
       const res = await runPowerShell(
         '(Get-CimInstance MSAcpi_ThermalZoneTemperature -Namespace root/wmi -ErrorAction SilentlyContinue).CurrentTemperature',
@@ -324,6 +464,8 @@ export class WatchdogService {
         if (!isNaN(kelvinTenths) && kelvinTenths > 2700 && kelvinTenths < 4000) {
           const celsius = Math.round(kelvinTenths / 10 - 273.15)
           if (celsius > 0 && celsius < 125) {
+            this.wmiTempSupported = true
+            this.lastTempValue = celsius
             return celsius
           }
         }
@@ -332,6 +474,9 @@ export class WatchdogService {
       /* ignore */
     }
 
+    // Se retornou vazio ou erro, desativa definitivamente o PowerShell de temperatura nesta sessão
+    this.wmiTempSupported = false
+    this.lastTempValue = null
     return null
   }
 
@@ -341,12 +486,23 @@ export class WatchdogService {
     const projects = this.db.listProjects().filter((p) => p.status === 'running')
     if (projects.length === 0) return
 
+    const now = Date.now()
+    const shouldCheckProcesses = now - this.lastProcessCheckTs >= 30_000 && projects.some((p) => p.pid)
+
     let procList: si.Systeminformation.ProcessesProcessData[] = []
-    try {
-      const procInfo = await si.processes()
-      procList = procInfo.list || []
-    } catch (err) {
-      log.warn('Falha ao listar processos do sistema via systeminformation', err)
+    if (shouldCheckProcesses) {
+      try {
+        const procInfo = await si.processes()
+        procList = procInfo.list || []
+        this.lastProcessCheckTs = now
+      } catch (err) {
+        log.warn('Falha ao listar processos do sistema via systeminformation', err)
+      }
+    }
+
+    const highCpuOverload = Boolean(this.cachedTelemetry && this.cachedTelemetry.cpu.loadPercent >= 88)
+    if (highCpuOverload) {
+      log.debug('Watchdog: Carga de CPU do host >= 88%. Healthchecks ignorados neste ciclo para evitar falsos positivos.')
     }
 
     for (const p of projects) {
@@ -377,6 +533,11 @@ export class WatchdogService {
 
       // 2. HTTP Healthcheck Inteligente (com fallback para raiz / evitando falsos positivos)
       if (p.port) {
+        // Se a CPU do host estiver em sobrecarga (>= 88%), pula a contabilização de falhas de healthcheck
+        if (highCpuOverload) {
+          continue
+        }
+
         const failThreshold = settings.watchdog.healthFailThreshold || 3
         const configuredPath = p.healthcheckPath
           ? p.healthcheckPath.startsWith('/')
@@ -388,7 +549,7 @@ export class WatchdogService {
         let ok = false
         try {
           const ctrl = new AbortController()
-          const timeout = setTimeout(() => ctrl.abort(), 5_000)
+          const timeout = setTimeout(() => ctrl.abort(), 8_000)
           const res = await fetch(primaryUrl, { signal: ctrl.signal })
           clearTimeout(timeout)
 
@@ -397,7 +558,7 @@ export class WatchdogService {
           } else if (res.status === 404 && configuredPath !== '/') {
             // Se a rota específica retornou 404, testa a raiz '/' como fallback
             const rootCtrl = new AbortController()
-            const rootTimeout = setTimeout(() => rootCtrl.abort(), 4_000)
+            const rootTimeout = setTimeout(() => rootCtrl.abort(), 8_000)
             const rootRes = await fetch(`http://127.0.0.1:${p.port}/`, { signal: rootCtrl.signal })
             clearTimeout(rootTimeout)
             // Qualquer código HTTP entre 200 e 404 comprova que o servidor web está rodando e ativo

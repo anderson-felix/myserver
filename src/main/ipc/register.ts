@@ -60,23 +60,31 @@ export function registerIpcHandlers(services: AppServices): void {
     return systemLogger.clear()
   })
 
+  let cachedBinaries: SystemInfo['binaries'] | null = null
+  let cachedIsAdmin: boolean | null = null
+
   handle(IPC.systemGetInfo, async (): Promise<SystemInfo> => {
-    const isElevated = await isAdmin()
+    if (cachedIsAdmin === null) {
+      cachedIsAdmin = await isAdmin()
+    }
+    if (!cachedBinaries) {
+      cachedBinaries = {
+        node: { path: binaryPath('node'), present: binaryPresent('node') },
+        caddy: { path: binaryPath('caddy'), present: binaryPresent('caddy') },
+        cloudflared: { path: binaryPath('cloudflared'), present: binaryPresent('cloudflared') },
+        nssm: { path: binaryPath('nssm'), present: binaryPresent('nssm') }
+      }
+    }
     const settings = db.getFullSettings()
     return {
-      isAdmin: isElevated,
+      isAdmin: cachedIsAdmin,
       platform: process.platform,
       appVersion: app.getVersion(),
       electronVersion: process.versions.electron,
       isPackaged: app.isPackaged,
       workspaceRoot: settings.workspaceRoot,
       userDataDir: app.getPath('userData'),
-      binaries: {
-        node: { path: binaryPath('node'), present: binaryPresent('node') },
-        caddy: { path: binaryPath('caddy'), present: binaryPresent('caddy') },
-        cloudflared: { path: binaryPath('cloudflared'), present: binaryPresent('cloudflared') },
-        nssm: { path: binaryPath('nssm'), present: binaryPresent('nssm') }
-      },
+      binaries: cachedBinaries,
       runnerConfigured: settings.hardening.runnerConfigured
     }
   })
@@ -216,8 +224,13 @@ export function registerIpcHandlers(services: AppServices): void {
     return notifications.testChannel(channel)
   })
 
-  handle(IPC.notificationsDetectTelegramChat, async (botToken: string) => {
+  handle(IPC.notificationsDetectTelegramChat, async (botToken?: string) => {
     return notifications.detectTelegramChat(botToken)
+  })
+
+  handle(IPC.watchdogSimulatePowerOutage, async () => {
+    await watchdog.handlePowerEvent(false, true)
+    return { success: true }
   })
 
   handle(IPC.incidentsList, (limit?: number) => {

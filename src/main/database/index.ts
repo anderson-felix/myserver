@@ -18,6 +18,7 @@ const log = createLogger('database')
 
 export class AppDatabase {
   private db: Database.Database
+  private cachedFullSettings: AppSettings | null = null
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true })
@@ -152,6 +153,7 @@ export class AppDatabase {
   }
 
   public setSetting(key: string, value: unknown): void {
+    this.cachedFullSettings = null
     const str = typeof value === 'string' ? value : JSON.stringify(value)
     this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, str)
   }
@@ -167,15 +169,20 @@ export class AppDatabase {
   }
 
   public setSecret(key: string, value: string | null): void {
-    if (value === null) {
+    this.cachedFullSettings = null
+    if (value === null || value.trim() === '') {
       this.db.prepare('DELETE FROM settings WHERE key = ?').run(`secret:${key}`)
     } else {
-      const enc = encrypt(value)
+      const enc = encrypt(value.trim())
       this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(`secret:${key}`, enc)
     }
   }
 
   public getFullSettings(): AppSettings {
+    if (this.cachedFullSettings) {
+      return this.cachedFullSettings
+    }
+
     const discordWebhook = this.getSecret('discord_webhook')
     const teamsWebhook = this.getSecret('teams_webhook')
     const slackWebhook = this.getSecret('slack_webhook')
@@ -185,7 +192,7 @@ export class AppDatabase {
 
     const mask = (v: string | null) => (v ? `${v.slice(0, 16)}••••••${v.slice(-4)}` : '')
 
-    return {
+    const settings: AppSettings = {
       workspaceRoot: this.getSetting('workspaceRoot', 'C:\\HomeServerApps'),
       caddyHttpPort: this.getSetting('caddyHttpPort', 80),
       autoLaunch: this.getSetting('autoLaunch', true),
@@ -196,15 +203,19 @@ export class AppDatabase {
         discordEnabled: this.getSetting('notifications_discord_enabled', true),
         discordWebhookSet: !!discordWebhook,
         discordWebhookMasked: mask(discordWebhook),
+        discordWebhook: discordWebhook || '',
         teamsEnabled: this.getSetting('notifications_teams_enabled', true),
         teamsWebhookSet: !!teamsWebhook,
         teamsWebhookMasked: mask(teamsWebhook),
+        teamsWebhook: teamsWebhook || '',
         slackEnabled: this.getSetting('notifications_slack_enabled', false),
         slackWebhookSet: !!slackWebhook,
         slackWebhookMasked: mask(slackWebhook),
+        slackWebhook: slackWebhook || '',
         telegramEnabled: this.getSetting('notifications_telegram_enabled', false),
         telegramBotTokenSet: !!telegramBotToken,
         telegramBotTokenMasked: mask(telegramBotToken),
+        telegramBotToken: telegramBotToken || '',
         telegramChatId: this.getSetting('notifications_telegram_chat_id', '')
       },
       watchdog: this.getSetting('watchdog_config', {
@@ -240,9 +251,13 @@ export class AppDatabase {
         namedConfiguredAt: this.getSetting<number | null>('tunnel_namedConfiguredAt', null)
       }
     }
+
+    this.cachedFullSettings = settings
+    return settings
   }
 
   public updateSettings(update: SettingsUpdate): void {
+    this.cachedFullSettings = null
     if (update.workspaceRoot !== undefined) this.setSetting('workspaceRoot', update.workspaceRoot)
     if (update.caddyHttpPort !== undefined) this.setSetting('caddyHttpPort', update.caddyHttpPort)
     if (update.autoLaunch !== undefined) this.setSetting('autoLaunch', update.autoLaunch)

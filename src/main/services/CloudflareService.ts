@@ -15,6 +15,7 @@ const QUICK_TUNNEL_REGEX = /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/
 
 export class CloudflareService {
   private activeTunnels: Map<string, { child: ChildProcess; tunnel: QuickTunnel }> = new Map()
+  private cachedNamedSvc: { installed: boolean; state: string | null; ts: number } | null = null
 
   constructor(
     private db: AppDatabase,
@@ -25,17 +26,29 @@ export class CloudflareService {
     const isPresent = binaryPresent('cloudflared')
     const quick = Array.from(this.activeTunnels.values()).map((v) => v.tunnel)
 
-    // Verifica se o serviço do Windows 'Cloudflared' está instalado
-    const svcStatus = await getServicesStatus(['Cloudflared'])
-    const namedSvc = svcStatus['Cloudflared']
+    // Cacheia verificação de serviço do Windows por 60 segundos para evitar spawn de powershell.exe
+    const now = Date.now()
+    let namedSvcState: { installed: boolean; state: string | null }
+    if (this.cachedNamedSvc && now - this.cachedNamedSvc.ts < 60_000) {
+      namedSvcState = this.cachedNamedSvc
+    } else {
+      const svcStatus = await getServicesStatus(['Cloudflared'])
+      const namedSvc = svcStatus['Cloudflared']
+      namedSvcState = {
+        installed: !!namedSvc,
+        state: namedSvc ? namedSvc.state : null
+      }
+      this.cachedNamedSvc = { ...namedSvcState, ts: now }
+    }
+
     const settings = this.db.getFullSettings()
 
     return {
       binaryPresent: isPresent,
       quick,
       named: {
-        installed: !!namedSvc,
-        state: namedSvc ? namedSvc.state : null,
+        installed: namedSvcState.installed,
+        state: namedSvcState.state,
         configuredAt: settings.tunnel.namedConfiguredAt
       }
     }
@@ -167,6 +180,7 @@ export class CloudflareService {
     }
 
     this.db.setSetting('tunnel_namedConfiguredAt', Date.now())
+    this.cachedNamedSvc = null
     await this.notifications.notify({
       severity: 'success',
       category: 'system',
@@ -184,6 +198,7 @@ export class CloudflareService {
       Write-Output "Serviço Cloudflared desinstalado."
     `
     await runPrivileged(script)
+    this.cachedNamedSvc = null
     this.db.setSetting('tunnel_namedConfiguredAt', null)
   }
 }

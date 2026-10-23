@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.darklabs.myserver",
+  "productName": "MyServer Orchestrator",
+  "copyright": "Copyright © DarkLabs",
+  "directories": {
+    "output": "release/${version}",
+    "buildResources": "resources"
+  },
+  "files": ["out/**/*", "package.json"],
+  "asarUnpack": ["**/*.node"],
+  "npmRebuild": false,
+  "extraResources": [
+    { "from": "bin/win", "to": "bin", "filter": ["**/*", "!.gitkeep"] },
+    { "from": "resources/launcher", "to": "launcher" },
+    { "from": "resources/icon.png", "to": "icon.png" }
+  ],
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "icon": "resources/icon.png",
+    "requestedExecutionLevel": "requireAdministrator",
+    "artifactName": "MyServer-Setup-${version}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": true,
+    "allowElevation": true,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "MyServer",
+    "uninstallDisplayName": "MyServer Orchestrator"
+  }
+}

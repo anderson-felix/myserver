@@ -1,0 +1,14 @@
+node_modules/
+out/
+release/
+dist/
+*.log
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+
+# Binários portáteis baixados por `npm run fetch-binaries`
+bin/win/*
+!bin/win/.gitkeep
+.cache/
+*.tsbuildinfo

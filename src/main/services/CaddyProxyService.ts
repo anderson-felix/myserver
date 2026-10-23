@@ -177,6 +177,26 @@ export class CaddyProxyService {
     const settings = this.db.getFullSettings()
     const projects = this.db.listProjects().filter((p) => p.status === 'running')
     const caddyRoutes = this.generateCaddyRoutes(projects)
+    const mainPort = settings.caddyHttpPort || 80
+
+    const servers: Record<string, any> = {
+      srv0: {
+        listen: [`:${mainPort}`],
+        routes: caddyRoutes
+      }
+    }
+
+    // Servidores dedicados por projeto estático: escutam em :porta SEM restrição de Host,
+    // aceitando 127.0.0.1, IP da LAN e *.trycloudflare.com (Quick Tunnel) sem 404.
+    for (const p of projects) {
+      if (p.stack === 'static' && p.port && p.port !== mainPort) {
+        servers[`srv_proj_${p.id}`] = {
+          listen: [`:${p.port}`],
+          routes: this.buildStaticRoutes(p, null),
+          automatic_https: { disable: true }
+        }
+      }
+    }
 
     const caddyConfig = {
       admin: {
@@ -185,13 +205,8 @@ export class CaddyProxyService {
       },
       apps: {
         http: {
-          http_port: settings.caddyHttpPort || 80,
-          servers: {
-            srv0: {
-              listen: [`:${settings.caddyHttpPort || 80}`],
-              routes: caddyRoutes
-            }
-          }
+          http_port: mainPort,
+          servers
         }
       }
     }
@@ -249,12 +264,9 @@ export class CaddyProxyService {
     }
   }
 
-  private generateCaddyRoutes(projects: Project[]): any[] {
-    const routes: any[] = []
-    const allProjects = this.db.listProjects()
-
-    // Headers de segurança padrão e limite de tamanho do corpo (10MB)
-    const securityMiddleware = {
+  private securityMiddleware() {
+    // Headers de segurança padrão
+    return {
       handler: 'headers',
       response: {
         set: {
@@ -265,96 +277,118 @@ export class CaddyProxyService {
         }
       }
     }
+  }
 
-    const requestBodyLimitMiddleware = {
+  private requestBodyLimitMiddleware() {
+    // Limite de tamanho do corpo (10MB)
+    return {
       handler: 'request_body',
       max_size: 10485760 // 10 MB
     }
+  }
+
+  /**
+   * Gera as rotas de um projeto estático: proxy /api/* (opcional) + file_server com SPA fallback.
+   * `hosts = null` gera rotas sem matcher de Host (usado nos servidores dedicados por porta).
+   */
+  private buildStaticRoutes(p: Project, hosts: string[] | null, allProjects?: Project[]): any[] {
+    const routes: any[] = []
+    const all = allProjects ?? this.db.listProjects()
+    const rootPath = p.outputDir ? join(p.workdir, p.outputDir) : p.workdir
+    const hostMatch = hosts ? { host: hosts } : {}
+
+    // 1. Se houver Backend API vinculado, adiciona proxy de rota /api/* ANTES do fallback estático
+    if (p.apiProxyTarget) {
+      const apiDial = this.resolveApiProxyDial(p.apiProxyTarget, all)
+      if (apiDial) {
+        routes.push({
+          match: [{ ...hostMatch, path: ['/api/*', '/api'] }],
+          handle: [
+            this.securityMiddleware(),
+            this.requestBodyLimitMiddleware(),
+            {
+              handler: 'reverse_proxy',
+              upstreams: [{ dial: apiDial }]
+            }
+          ],
+          terminal: true
+        })
+      }
+    }
+
+    // 2. Manipulador de arquivos estáticos com suporte nativo a SPA (try_files fallback index.html)
+    const subroutes: any[] = [
+      {
+        handle: [
+          {
+            handler: 'vars',
+            root: rootPath.replace(/\\/g, '/')
+          }
+        ]
+      }
+    ]
+
+    if (p.spaFallback !== false) {
+      // Fallback para Single Page Application (React Router / Vite / Next estático)
+      subroutes.push({
+        handle: [
+          {
+            handler: 'rewrite',
+            uri: '{http.matchers.file.relative}'
+          }
+        ],
+        match: [
+          {
+            file: {
+              try_files: ['{http.request.uri.path}', '/index.html']
+            }
+          }
+        ]
+      })
+    }
+
+    subroutes.push({
+      handle: [
+        {
+          handler: 'file_server',
+          hide: ['.git']
+        }
+      ]
+    })
+
+    const mainRoute: any = {
+      handle: [
+        this.securityMiddleware(),
+        this.requestBodyLimitMiddleware(),
+        {
+          handler: 'subroute',
+          routes: subroutes
+        }
+      ],
+      terminal: true
+    }
+    if (hosts) mainRoute.match = [{ host: hosts }]
+    routes.push(mainRoute)
+
+    return routes
+  }
+
+  private generateCaddyRoutes(projects: Project[]): any[] {
+    const routes: any[] = []
+    const allProjects = this.db.listProjects()
 
     for (const p of projects) {
       const matchHosts = p.domains && p.domains.length > 0 ? p.domains : [`${p.slug}.localhost`, `localhost`]
 
       if (p.stack === 'static') {
-        const rootPath = p.outputDir ? join(p.workdir, p.outputDir) : p.workdir
-
-        // 1. Se houver Backend API vinculado, adiciona proxy de rota /api/* ANTES do fallback estático
-        if (p.apiProxyTarget) {
-          const apiDial = this.resolveApiProxyDial(p.apiProxyTarget, allProjects)
-          if (apiDial) {
-            routes.push({
-              match: [{ host: matchHosts, path: ['/api/*', '/api'] }],
-              handle: [
-                securityMiddleware,
-                requestBodyLimitMiddleware,
-                {
-                  handler: 'reverse_proxy',
-                  upstreams: [{ dial: apiDial }]
-                }
-              ],
-              terminal: true
-            })
-          }
-        }
-
-        // 2. Manipulador de arquivos estáticos com suporte nativo a SPA (try_files fallback index.html)
-        const subroutes: any[] = [
-          {
-            handle: [
-              {
-                handler: 'vars',
-                root: rootPath.replace(/\\/g, '/')
-              }
-            ]
-          }
-        ]
-
-        if (p.spaFallback !== false) {
-          // Fallback para Single Page Application (React Router / Vite / Next estático)
-          subroutes.push({
-            handle: [
-              {
-                handler: 'rewrite',
-                uri: '{http.matchers.file.relative}'
-              }
-            ],
-            match: [
-              {
-                file: {
-                  try_files: ['{http.request.uri.path}', '/index.html']
-                }
-              }
-            ]
-          })
-        }
-
-        subroutes.push({
-          handle: [
-            {
-              handler: 'file_server',
-              hide: ['.git']
-            }
-          ]
-        })
-
-        routes.push({
-          match: [{ host: matchHosts }],
-          handle: [
-            securityMiddleware,
-            requestBodyLimitMiddleware,
-            {
-              handler: 'subroute',
-              routes: subroutes
-            }
-          ],
-          terminal: true
-        })
+        routes.push(...this.buildStaticRoutes(p, matchHosts, allProjects))
       } else if (p.port) {
         // Proxy reverso HTTP para portas internas (3001..3999)
         routes.push({
           match: [{ host: matchHosts }],
           handle: [
-            securityMiddleware,
-            requestBodyLimitMiddleware,
+            this.securityMiddleware(),
+            this.requestBodyLimitMiddleware(),
             {
               handler: 'reverse_proxy',
               upstreams: [{ dial: `127.0.0.1:${p.port}` }]
@@ -376,7 +410,7 @@ export class CaddyProxyService {
       hosts: p.domains.length > 0 ? p.domains : [`${p.slug}.localhost`],
       upstream:
         p.stack === 'static'
-          ? `static:${p.outputDir || 'root'}${p.apiProxyTarget ? ` (Proxy /api/* -> ${p.apiProxyTarget})` : ''}`
+          ? `static:${p.outputDir || 'root'}${p.port ? ` @ :${p.port}` : ''}${p.apiProxyTarget ? ` (Proxy /api/* -> ${p.apiProxyTarget})` : ''}`
           : `127.0.0.1:${p.port}`,
       kind: p.stack === 'static' ? 'file_server' : 'reverse_proxy'
     }))

@@ -19,6 +19,7 @@ import { Badge } from '../components/Badge'
 import { Modal } from '../components/Modal'
 import { HelpDrawer } from '../components/HelpDrawer'
 import { InfoTooltip } from '../components/InfoTooltip'
+import { useToast } from '../components/Toast'
 import type { ProxyStatus, TunnelStatus, QuickTunnel, Project } from '@shared/types'
 
 export const Networking: React.FC = () => {
@@ -26,6 +27,7 @@ export const Networking: React.FC = () => {
   const [tunnelStatus, setTunnelStatus] = useState<TunnelStatus | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [isHelpOpen, setIsHelpOpen] = useState(false)
+  const toast = useToast()
 
   // Quick Tunnel Modal
   const [isQuickModalOpen, setIsQuickModalOpen] = useState(false)
@@ -59,7 +61,9 @@ export const Networking: React.FC = () => {
 
   useEffect(() => {
     loadData()
-    const interval = setInterval(loadData, 4000)
+    const interval = setInterval(() => {
+      if (!document.hidden) loadData()
+    }, 4000)
 
     const unsubTunnel = window.api.onTunnelUpdate(() => {
       loadData()
@@ -89,7 +93,7 @@ export const Networking: React.FC = () => {
       setIsQuickModalOpen(false)
       loadData()
     } catch (err) {
-      alert(`Falha ao disparar Quick Tunnel: ${(err as Error).message}`)
+      toast.error('Falha ao disparar Quick Tunnel', (err as Error).message)
     } finally {
       setStartingQuick(false)
     }
@@ -100,7 +104,7 @@ export const Networking: React.FC = () => {
       await window.api.stopQuickTunnel(id)
       loadData()
     } catch (err) {
-      alert(`Falha ao parar túnel: ${(err as Error).message}`)
+      toast.error('Falha ao parar túnel', (err as Error).message)
     }
   }
 
@@ -111,31 +115,38 @@ export const Networking: React.FC = () => {
     try {
       await window.api.configureNamedTunnel(namedToken)
       setNamedToken('')
-      alert('Serviço Cloudflared permanente instalado com sucesso!')
+      toast.success('Túnel permanente ativo', 'Serviço Cloudflared instalado com sucesso.')
       loadData()
     } catch (err) {
-      alert(`Erro ao configurar Named Tunnel: ${(err as Error).message}`)
+      toast.error('Erro ao configurar Named Tunnel', (err as Error).message)
     } finally {
       setConfiguringNamed(false)
     }
   }
 
   const handleUninstallNamed = async () => {
-    if (!confirm('Deseja desinstalar o serviço permanente do Cloudflare?')) return
+    const ok = await toast.confirm('Deseja desinstalar o serviço permanente do Cloudflare?', {
+      title: 'Desinstalar Named Tunnel',
+      confirmLabel: 'Desinstalar',
+      danger: true
+    })
+    if (!ok) return
     try {
       await window.api.uninstallNamedTunnel()
+      toast.success('Serviço Cloudflared desinstalado')
       loadData()
     } catch (err) {
-      alert(`Erro ao desinstalar: ${(err as Error).message}`)
+      toast.error('Erro ao desinstalar', (err as Error).message)
     }
   }
 
   const handleSyncProxy = async () => {
     try {
       await window.api.syncProxyRoutes()
+      toast.success('Rotas do Caddy sincronizadas')
       loadData()
     } catch (err) {
-      alert(`Falha ao sincronizar: ${(err as Error).message}`)
+      toast.error('Falha ao sincronizar', (err as Error).message)
     }
   }
 
@@ -242,7 +253,12 @@ export const Networking: React.FC = () => {
             </button>
             {!proxyStatus?.serviceInstalled && (
               <button
-                onClick={() => window.api.installProxyService().then(() => alert('Serviço Caddy instalado!'))}
+                onClick={() =>
+                  window.api
+                    .installProxyService()
+                    .then(() => toast.success('Serviço Caddy instalado!'))
+                    .catch((err) => toast.error('Falha ao instalar serviço Caddy', (err as Error).message))
+                }
                 className="px-3 py-1.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-indigo-400 text-xs border border-indigo-500/30 transition-colors"
               >
                 Instalar como Serviço Windows (NSSM)

@@ -116,10 +116,13 @@ export const api = {
   configureS3: (config: S3Config) => invoke<void>(IPC.backupConfigureS3, config),
   testS3: (config: S3Config & { secretAccessKey: string }) => invoke<void>(IPC.backupTestS3, config),
   onBackupProgress: (cb: (progress: BackupProgress) => void) => onEvent<BackupProgress>(IPC.backupOnProgress, cb),
+  restoreBackup: (backupId: number, passphrase?: string, targetDir?: string) =>
+    invoke<{ restoredTo: string }>(IPC.backupDecrypt, { backupId, passphrase, targetDir }),
 
   // Configurações
   getSettings: () => invoke<AppSettings>(IPC.settingsGet),
   updateSettings: (update: SettingsUpdate) => invoke<AppSettings>(IPC.settingsUpdate, update),
+  onSettingsUpdated: (cb: (settings: AppSettings) => void) => onEvent<AppSettings>(IPC.settingsOnUpdated, cb),
 
   // Linux Remoto (Modelo B)
   listLinuxNodes: () => invoke<LinuxNode[]>(IPC.linuxNodeList),

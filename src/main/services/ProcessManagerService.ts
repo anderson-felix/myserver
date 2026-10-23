@@ -82,7 +82,7 @@ export class ProcessManagerService {
       ...input,
       id,
       slug,
-      port: null,
+      port: input.port ?? null,
       status: 'idle',
       statusMessage: 'Criado com sucesso',
       pid: null,
@@ -111,8 +111,15 @@ export class ProcessManagerService {
     const updated = this.db.getProject(id)
     if (!updated) throw new Error('Projeto não encontrado')
 
-    // Se houve mudança de domínios ou portas, sincroniza proxy
-    if (this.caddyProxy && (partial.domains !== undefined || partial.outputDir !== undefined)) {
+    // Se houve mudança de domínios, portas, stack ou proxy /api/*, sincroniza Caddy
+    const affectsProxy =
+      partial.domains !== undefined ||
+      partial.outputDir !== undefined ||
+      partial.port !== undefined ||
+      partial.stack !== undefined ||
+      partial.spaFallback !== undefined ||
+      partial.apiProxyTarget !== undefined
+    if (this.caddyProxy && affectsProxy) {
       this.caddyProxy.syncRoutes().catch(() => undefined)
     }
 
@@ -138,14 +145,15 @@ export class ProcessManagerService {
     this.appendLog(id, 'system', `=== Iniciando aplicação [${project.name}] ===`)
 
     try {
-      // 1. Aloca porta livre se não tiver ou se for static
+      // 1. Aloca porta livre (3001..3999) para TODAS as stacks — inclusive estáticas,
+      //    que ganham um servidor Caddy dedicado em :porta (sem restrição de Host),
+      //    permitindo http://127.0.0.1:porta e Quick Tunnels sem 404.
       let port = project.port
-      if (project.stack !== 'static') {
-        if (!port || !(await this.isPortAvailable(port))) {
-          port = await getPort({ port: portNumbers(3001, 3999) })
-          this.db.updateProject(id, { port })
-          this.appendLog(id, 'system', `Porta interna alocada: ${port}`)
-        }
+      if (!port || !(await this.isPortAvailable(port))) {
+        if (port) this.appendLog(id, 'system', `Porta ${port} ocupada. Alocando outra automaticamente...`)
+        port = await getPort({ port: portNumbers(3001, 3999) })
+        this.db.updateProject(id, { port })
+        this.appendLog(id, 'system', `Porta interna alocada: ${port}`)
       }
 
       // 2. Se for stack estática (HTML/SPA)
@@ -158,8 +166,8 @@ export class ProcessManagerService {
             this.db.updateProject(id, { lastDeployAt: Date.now() })
           }
         }
-        this.setStatus(id, 'running', 'Servindo arquivos estáticos via Caddy Proxy')
-        this.appendLog(id, 'system', 'Aplicação estática pronta. Gerenciada diretamente pelo Caddy Proxy.')
+        this.setStatus(id, 'running', `Servindo arquivos estáticos via Caddy em http://127.0.0.1:${port}`)
+        this.appendLog(id, 'system', `Aplicação estática pronta em http://127.0.0.1:${port} (servidor Caddy dedicado).`)
         if (this.caddyProxy) await this.caddyProxy.syncRoutes()
         return this.db.getProject(id)!
       }

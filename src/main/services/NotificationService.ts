@@ -100,15 +100,18 @@ export class NotificationService {
           const username = msg.from?.username || msg.chat?.username
 
           const currentChatId = this.db.getSetting('notifications_telegram_chat_id', '')
+          const wasEnabled = this.db.getSetting('notifications_telegram_enabled', false)
           if (!currentChatId || currentChatId !== chatId) {
             this.db.setSetting('notifications_telegram_chat_id', chatId)
             this.db.setSetting('notifications_telegram_enabled', true)
             log.info(`Telegram Poller: Chat ID auto-detectado via ${text}: ${chatId} (${firstName})`)
-          } else {
+          } else if (!wasEnabled) {
             this.db.setSetting('notifications_telegram_enabled', true)
           }
 
           const settings = this.db.getFullSettings()
+          // Atualiza a UI ao vivo (AlertsAndBackup preenche Chat ID e ativa o switch sozinho)
+          broadcast(IPC.settingsOnUpdated, settings)
           await this.sendTelegram(token.trim(), chatId, {
             title: 'Bot do MyServer Orchestrator Online!',
             message: `Olá, ${firstName}! O bot do MyServer Orchestrator está ativo e vinculado a este chat. Todas as notificações e alertas de hardware estão ativados.`,
@@ -402,6 +405,7 @@ export class NotificationService {
         this.db.setSetting('notifications_telegram_enabled', true)
 
         const settings = this.db.getFullSettings()
+        broadcast(IPC.settingsOnUpdated, settings)
         try {
           await this.sendTelegram(token, chatId, {
             title: 'Bot Vinculado com Sucesso!',

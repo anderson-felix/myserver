@@ -56,3 +56,29 @@
 .glow-rose {
   box-shadow: 0 0 20px -3px rgba(244, 63, 94, 0.25);
 }
+
+/* Toasts: animações leves (apenas transform/opacity) */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(16px) scale(0.98); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(16px); }
+}
+@keyframes toast-progress {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+.toast-enter { animation: toast-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.toast-leave { animation: toast-out 0.25s ease-in both; }
+.toast-progress { transform-origin: left; animation-name: toast-progress; animation-timing-function: linear; animation-fill-mode: both; }
+
+/* Indicador discreto de auto-save */
+@keyframes saved-fade {
+  0% { opacity: 0; transform: translateY(-2px); }
+  15% { opacity: 1; transform: translateY(0); }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.saved-indicator { animation: saved-fade 2.4s ease-out both; }

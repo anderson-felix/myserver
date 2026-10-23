@@ -3,7 +3,7 @@ import * as tar from 'tar'
 import { S3Client, PutObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3'
 import { mkdirSync, existsSync, readdirSync, statSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { join, basename } from 'node:path'
-import { createCipheriv, scryptSync, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, scryptSync, randomBytes } from 'node:crypto'
 import { createLogger } from '../utils/logger'
 import { broadcast } from '../utils/common'
 import { workspaceLayout } from '../paths'
@@ -210,6 +210,71 @@ export class BackupService {
     })
 
     await client.send(new HeadBucketCommand({ Bucket: config.bucket }))
+  }
+
+  /**
+   * Restaura um backup criptografado (.hsenc) em 1 clique.
+   * Formato: [SALT 16B][IV 12B][TAG 16B][CIPHERTEXT] → tar.gz → extração.
+   * Por padrão extrai em `<workspaceRoot>/restores/restore_<data>` para nunca sobrescrever dados vivos.
+   */
+  public async restoreBackup(backupId: number, passphrase?: string, targetDir?: string): Promise<{ restoredTo: string }> {
+    const record = this.db.listBackups(1000).find((b) => b.id === backupId)
+    if (!record) throw new Error(`Backup #${backupId} não encontrado no histórico`)
+    if (record.status !== 'ok') throw new Error('Este backup falhou durante a criação e não pode ser restaurado')
+    if (!existsSync(record.file)) throw new Error(`Arquivo não encontrado no disco: ${record.file}`)
+
+    const settings = this.db.getFullSettings()
+    const secret =
+      (passphrase && passphrase.trim()) || this.db.getSecret('backup_passphrase') || 'HomeServer-Default-Key-2026'
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const destDir = targetDir && targetDir.trim() ? targetDir : join(settings.workspaceRoot, 'restores', `restore_${stamp}`)
+    mkdirSync(destDir, { recursive: true })
+
+    this.emitProgress('encrypt', `Descriptografando ${basename(record.file)}...`)
+    const data = readFileSync(record.file)
+    if (data.length < 16 + 12 + 16) throw new Error('Arquivo .hsenc corrompido ou truncado')
+
+    const salt = data.subarray(0, 16)
+    const iv = data.subarray(16, 28)
+    const tag = data.subarray(28, 44)
+    const ciphertext = data.subarray(44)
+
+    let plain: Buffer
+    try {
+      const key = scryptSync(secret, salt, 32)
+      const decipher = createDecipheriv('aes-256-gcm', key, iv)
+      decipher.setAuthTag(tag)
+      plain = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+    } catch {
+      this.emitProgress('error', 'Senha incorreta ou arquivo adulterado')
+      throw new Error('Falha na descriptografia: senha (passphrase) incorreta ou arquivo adulterado')
+    }
+
+    const tmpArchive = join(destDir, '__restore_tmp.tar.gz')
+    writeFileSync(tmpArchive, plain)
+    try {
+      this.emitProgress('compress', 'Extraindo arquivos restaurados...')
+      await tar.extract({ file: tmpArchive, cwd: destDir })
+    } finally {
+      try {
+        unlinkSync(tmpArchive)
+      } catch {
+        /* ignore */
+      }
+    }
+
+    this.emitProgress('done', `Backup restaurado em ${destDir}`)
+    log.info(`Backup #${backupId} restaurado em ${destDir}`)
+    await this.notifications.notify({
+      severity: 'success',
+      category: 'backup',
+      title: 'Backup Restaurado com Sucesso',
+      message: `O arquivo ${basename(record.file)} foi descriptografado e extraído em ${destDir}.`,
+      extraFacts: { Destino: destDir }
+    })
+
+    return { restoredTo: destDir }
   }
 
   private rotateBackups(dir: string, maxFiles: number): void {

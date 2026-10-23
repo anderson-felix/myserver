@@ -268,6 +268,10 @@ export function registerIpcHandlers(services: AppServices): void {
     return backup.testS3(s3Config)
   })
 
+  handle(IPC.backupDecrypt, async ({ backupId, passphrase, targetDir }: { backupId: number; passphrase?: string; targetDir?: string }) => {
+    return backup.restoreBackup(backupId, passphrase, targetDir)
+  })
+
   // -------------------------------------------------------------------------
   // Configurações
   // -------------------------------------------------------------------------

@@ -71,6 +71,7 @@ export const IPC = {
   // Configurações
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
+  settingsOnUpdated: 'settings:on-updated',
 
   // Linux remoto (Modelo B)
   linuxNodeList: 'linux-node:list',
@@ -247,6 +248,8 @@ export interface ProjectInput {
   runtime: ProjectRuntime
   autoStart: boolean
   dataPaths: string[]
+  /** Porta fixa opcional (null/undefined = alocação automática 3001..3999) */
+  port?: number | null
 }
 
 export interface FolderInspection {

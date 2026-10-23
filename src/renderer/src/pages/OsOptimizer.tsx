@@ -16,6 +16,7 @@ import {
 import { BiosChecklistModal } from '../components/BiosChecklistModal'
 import { HelpDrawer } from '../components/HelpDrawer'
 import { InfoTooltip } from '../components/InfoTooltip'
+import { useToast } from '../components/Toast'
 import type { HardeningOptions, HardeningReport, NetworkPreview } from '@shared/types'
 
 export const OsOptimizer: React.FC = () => {
@@ -24,6 +25,7 @@ export const OsOptimizer: React.FC = () => {
   const [isHelpOpen, setIsHelpOpen] = useState(false)
   const [running, setRunning] = useState(false)
   const [report, setReport] = useState<HardeningReport | null>(null)
+  const toast = useToast()
 
   // Opções de Hardening
   const [options, setOptions] = useState<HardeningOptions>({
@@ -47,17 +49,22 @@ export const OsOptimizer: React.FC = () => {
   }, [])
 
   const handleRunHardening = async () => {
-    if (!confirm('Deseja aplicar a otimização de servidor no Windows? Se o aplicativo não estiver com privilégios de Administrador, uma janela do UAC será solicitada.')) {
-      return
-    }
+    const ok = await toast.confirm(
+      'Deseja aplicar a otimização de servidor no Windows? Se o aplicativo não estiver com privilégios de Administrador, uma janela do UAC será solicitada.',
+      { title: 'Blindar sistema operacional', confirmLabel: 'Aplicar otimização' }
+    )
+    if (!ok) return
 
     setRunning(true)
     try {
       const res = await window.api.runHardening(options)
       setReport(res)
       loadNetwork()
+      const failed = res.steps.filter((s) => s.status === 'failed').length
+      if (failed > 0) toast.warning('Otimização concluída com avisos', `${failed} etapa(s) falharam. Veja o relatório abaixo.`)
+      else toast.success('Servidor blindado com sucesso!', 'Todas as etapas selecionadas foram aplicadas.')
     } catch (err) {
-      alert(`Erro durante a otimização: ${(err as Error).message}`)
+      toast.error('Erro durante a otimização', (err as Error).message)
     } finally {
       setRunning(false)
     }

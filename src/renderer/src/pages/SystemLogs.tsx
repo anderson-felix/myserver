@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { XtermViewer } from '../components/XtermViewer'
 import { HelpDrawer } from '../components/HelpDrawer'
+import { useToast } from '../components/Toast'
 import type { SystemLogEntry, LogEvent } from '@shared/types'
 
 const MODULE_OPTIONS: Array<{ value: string; label: string }> = [
@@ -48,6 +49,7 @@ export const SystemLogs: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [isHelpOpen, setIsHelpOpen] = useState(false)
+  const toast = useToast()
 
   const loadLogs = async () => {
     setLoading(true)
@@ -79,18 +81,24 @@ export const SystemLogs: React.FC = () => {
   }, [selectedModule])
 
   const handleClear = async () => {
-    if (!confirm('Deseja limpar todos os logs do console do sistema?')) return
+    const ok = await toast.confirm('Deseja limpar todos os logs do console do sistema?', {
+      title: 'Limpar console',
+      confirmLabel: 'Limpar logs',
+      danger: true
+    })
+    if (!ok) return
     try {
       await window.api.clearSystemLogs()
       setLogs([])
+      toast.success('Console limpo')
     } catch (err) {
-      alert(`Erro ao limpar logs: ${(err as Error).message}`)
+      toast.error('Erro ao limpar logs', (err as Error).message)
     }
   }
 
   const handleExport = () => {
     if (logs.length === 0) {
-      alert('Nenhum log para exportar.')
+      toast.info('Nenhum log para exportar.')
       return
     }
 

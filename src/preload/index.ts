@@ -28,7 +28,13 @@ import {
   type LinuxLogEvent,
   type SystemLogEntry,
   type NotificationChannel,
-  type ChannelTestResult
+  type ChannelTestResult,
+  type DomainRecord,
+  type DomainInput,
+  type DomainDnsVerification,
+  type NetworkEndpoints,
+  type HostsApplyResult,
+  type CloudflareAutoDnsResult
 } from '@shared/types'
 
 async function invoke<T>(channel: string, args?: unknown): Promise<T> {
@@ -83,6 +89,16 @@ export const api = {
   configureNamedTunnel: (token: string) => invoke<void>(IPC.tunnelConfigureNamed, token),
   uninstallNamedTunnel: () => invoke<void>(IPC.tunnelUninstallNamed),
   onTunnelUpdate: (cb: (tunnel: QuickTunnel) => void) => onEvent<QuickTunnel>(IPC.tunnelOnUpdate, cb),
+
+  // Central de Domínios Próprios
+  listDomains: () => invoke<DomainRecord[]>(IPC.domainsList),
+  saveDomain: (input: DomainInput) => invoke<DomainRecord>(IPC.domainsSave, input),
+  deleteDomain: (id: string) => invoke<void>(IPC.domainsDelete, id),
+  verifyDomainDns: (id: string) => invoke<DomainDnsVerification>(IPC.domainsVerifyDns, id),
+  applyDomainHosts: (id: string) => invoke<HostsApplyResult>(IPC.domainsApplyHosts, id),
+  getNetworkEndpoints: (force?: boolean) => invoke<NetworkEndpoints>(IPC.domainsNetworkEndpoints, force),
+  autoConfigureCloudflareDns: (domainId: string, apiToken?: string) =>
+    invoke<CloudflareAutoDnsResult>(IPC.domainsCloudflareAutoDns, { domainId, apiToken }),
 
   // Caddy Proxy
   getProxyStatus: () => invoke<ProxyStatus>(IPC.proxyStatus),

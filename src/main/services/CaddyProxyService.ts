@@ -60,7 +60,8 @@ export class CaddyProxyService {
           servers: {
             srv0: {
               listen: [`:${settings.caddyHttpPort || 80}`],
-              routes: []
+              routes: [],
+              automatic_https: { disable_redirects: true }
             }
           }
         }
@@ -182,7 +183,8 @@ export class CaddyProxyService {
     const servers: Record<string, any> = {
       srv0: {
         listen: [`:${mainPort}`],
-        routes: caddyRoutes
+        routes: caddyRoutes,
+        automatic_https: { disable_redirects: true }
       }
     }
 
@@ -399,12 +401,33 @@ export class CaddyProxyService {
       }
     }
 
+    // Rotas para subdomínios vinculados diretamente a uma porta local (sem projeto gerenciado)
+    const allDomains = this.db.listDomains()
+    for (const d of allDomains) {
+      for (const s of d.subdomains) {
+        if (!s.projectId && s.targetPort) {
+          routes.push({
+            match: [{ host: [s.fullHostname] }],
+            handle: [
+              this.securityMiddleware(),
+              this.requestBodyLimitMiddleware(),
+              {
+                handler: 'reverse_proxy',
+                upstreams: [{ dial: `127.0.0.1:${s.targetPort}` }]
+              }
+            ],
+            terminal: true
+          })
+        }
+      }
+    }
+
     return routes
   }
 
   private buildActiveRoutesList(): ProxyRoute[] {
     const projects = this.db.listProjects().filter((p) => p.status === 'running')
-    return projects.map((p) => ({
+    const routes: ProxyRoute[] = projects.map((p) => ({
       projectId: p.id,
       projectName: p.name,
       hosts: p.domains.length > 0 ? p.domains : [`${p.slug}.localhost`],
@@ -414,6 +437,23 @@ export class CaddyProxyService {
           : `127.0.0.1:${p.port}`,
       kind: p.stack === 'static' ? 'file_server' : 'reverse_proxy'
     }))
+
+    const allDomains = this.db.listDomains()
+    for (const d of allDomains) {
+      for (const s of d.subdomains) {
+        if (!s.projectId && s.targetPort) {
+          routes.push({
+            projectId: `ext_${s.id}`,
+            projectName: `Porta Local :${s.targetPort} (${d.domain})`,
+            hosts: [s.fullHostname],
+            upstream: `127.0.0.1:${s.targetPort}`,
+            kind: 'reverse_proxy'
+          })
+        }
+      }
+    }
+
+    return routes
   }
 
   public async installService(): Promise<void> {

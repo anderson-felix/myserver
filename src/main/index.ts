@@ -14,6 +14,7 @@ import { CloudflareService } from './services/CloudflareService'
 import { BackupService } from './services/BackupService'
 import { LinuxSshService } from './services/LinuxSshService'
 import { SystemLoggerService } from './services/SystemLoggerService'
+import { DomainService } from './services/DomainService'
 import { registerIpcHandlers } from './ipc/register'
 
 const log = createLogger('main')
@@ -213,6 +214,8 @@ app.whenReady().then(async () => {
   const processManager = new ProcessManagerService(db, notifications)
   const caddyProxy = new CaddyProxyService(db, notifications)
   const cloudflare = new CloudflareService(db, notifications)
+  const domains = new DomainService(db)
+  domains.setCaddyProxy(caddyProxy)
   const backup = new BackupService(db, notifications)
   const linuxSsh = new LinuxSshService(db, notifications)
 
@@ -236,7 +239,8 @@ app.whenReady().then(async () => {
     cloudflare,
     backup,
     linuxSsh,
-    systemLogger
+    systemLogger,
+    domains
   })
 
   // Inicia janela e bandeja

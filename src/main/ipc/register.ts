@@ -13,6 +13,7 @@ import type { CloudflareService } from '../services/CloudflareService'
 import type { BackupService } from '../services/BackupService'
 import type { LinuxSshService } from '../services/LinuxSshService'
 import type { SystemLoggerService } from '../services/SystemLoggerService'
+import type { DomainService } from '../services/DomainService'
 import { inspectProjectFolder } from '../utils/folderInspector'
 
 const log = createLogger('ipc')
@@ -28,6 +29,7 @@ export interface AppServices {
   backup: BackupService
   linuxSsh: LinuxSshService
   systemLogger: SystemLoggerService
+  domains: DomainService
 }
 
 function handle<T, R>(channel: string, fn: (args: T) => Promise<R> | R): void {
@@ -43,7 +45,7 @@ function handle<T, R>(channel: string, fn: (args: T) => Promise<R> | R): void {
 }
 
 export function registerIpcHandlers(services: AppServices): void {
-  const { db, notifications, watchdog, osHardening, processManager, caddyProxy, cloudflare, backup, linuxSsh, systemLogger } = services
+  const { db, notifications, watchdog, osHardening, processManager, caddyProxy, cloudflare, backup, linuxSsh, systemLogger, domains } = services
 
   // -------------------------------------------------------------------------
   // Sistema / Informações / Hardening / Live Logs
@@ -120,11 +122,15 @@ export function registerIpcHandlers(services: AppServices): void {
   })
 
   handle(IPC.projectsCreate, async (input: any) => {
-    return processManager.create(input)
+    const created = await processManager.create(input)
+    await domains.syncFromProject(created.id)
+    return db.getProject(created.id) ?? created
   })
 
   handle(IPC.projectsUpdate, async ({ id, data }: { id: string; data: any }) => {
-    return processManager.update(id, data)
+    const updated = await processManager.update(id, data)
+    await domains.syncFromProject(id)
+    return db.getProject(id) ?? updated
   })
 
   handle(IPC.projectsStart, async (id: string) => {
@@ -144,7 +150,8 @@ export function registerIpcHandlers(services: AppServices): void {
   })
 
   handle(IPC.projectsDelete, async (id: string) => {
-    return processManager.delete(id)
+    await processManager.delete(id)
+    await domains.unlinkProject(id)
   })
 
   handle(IPC.projectsInspectFolder, async (folderPath: string) => {
@@ -180,6 +187,37 @@ export function registerIpcHandlers(services: AppServices): void {
 
   handle(IPC.tunnelUninstallNamed, async () => {
     return cloudflare.uninstallNamedTunnel()
+  })
+
+  // -------------------------------------------------------------------------
+  // Central de Domínios Próprios
+  // -------------------------------------------------------------------------
+  handle(IPC.domainsList, async () => {
+    return domains.list()
+  })
+
+  handle(IPC.domainsSave, async (input: any) => {
+    return domains.save(input)
+  })
+
+  handle(IPC.domainsDelete, async (id: string) => {
+    return domains.delete(id)
+  })
+
+  handle(IPC.domainsVerifyDns, async (id: string) => {
+    return domains.verifyDomainDns(id)
+  })
+
+  handle(IPC.domainsApplyHosts, async (id: string) => {
+    return domains.applyHostsFile(id)
+  })
+
+  handle(IPC.domainsNetworkEndpoints, async (force?: boolean) => {
+    return domains.getNetworkEndpoints(Boolean(force))
+  })
+
+  handle(IPC.domainsCloudflareAutoDns, async ({ domainId, apiToken }: { domainId: string; apiToken?: string }) => {
+    return domains.autoConfigureCloudflareDns(domainId, apiToken)
   })
 
   // -------------------------------------------------------------------------

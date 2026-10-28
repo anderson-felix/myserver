@@ -17,23 +17,28 @@ import {
   Copy,
   Check,
   FileCode,
-  Search
+  Search,
+  Edit2
 } from 'lucide-react'
 import { Badge } from '../components/Badge'
 import { Modal } from '../components/Modal'
 import { XtermViewer } from '../components/XtermViewer'
 import { HelpDrawer } from '../components/HelpDrawer'
 import { InfoTooltip } from '../components/InfoTooltip'
-import type { Project, ProjectInput, LogEvent } from '@shared/types'
+import { useToast } from '../components/Toast'
+import type { Project, ProjectInput, LogEvent, DomainRecord } from '@shared/types'
 
 export const Projects: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([])
+  const [domains, setDomains] = useState<DomainRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null)
   const [isGuideOpen, setIsGuideOpen] = useState(false)
   const [activeLogProjectId, setActiveLogProjectId] = useState<string | null>(null)
   const [projectLogs, setProjectLogs] = useState<LogEvent[]>([])
   const [copiedUrlProjId, setCopiedUrlProjId] = useState<string | null>(null)
+  const toast = useToast()
 
   // Formulário de Criação
   const [name, setName] = useState('')
@@ -118,10 +123,14 @@ export const Projects: React.FC = () => {
 
   const loadProjects = async () => {
     try {
-      const list = await window.api.listProjects()
+      const [list, doms] = await Promise.all([
+        window.api.listProjects(),
+        window.api.listDomains()
+      ])
       setProjects(list)
+      setDomains(doms)
     } catch (err) {
-      console.error('Erro ao listar projetos:', err)
+      console.error('Erro ao listar projetos ou domínios:', err)
     } finally {
       setLoading(false)
     }
@@ -165,6 +174,54 @@ export const Projects: React.FC = () => {
     if (selected) {
       setSource(selected)
       handleInspectFolder(selected)
+    }
+  }
+
+  const openCreateModal = () => {
+    setEditingProjectId(null)
+    resetForm()
+    setIsCreateModalOpen(true)
+  }
+
+  const openEditModal = async (p: Project) => {
+    setEditingProjectId(p.id)
+    setName(p.name)
+    setSourceType(p.sourceType)
+    setSource(p.source)
+    setBranch(p.branch || 'main')
+    setStack(p.stack)
+    setBuildCommand(p.buildCommand || '')
+    setStartCommand(p.startCommand || '')
+    setOutputDir(p.outputDir || 'dist')
+    setSpaFallback(p.spaFallback !== false)
+    setApiProxyTarget(p.apiProxyTarget || '')
+    setCustomProxyMode(!!p.apiProxyTarget)
+    setMaxMemoryMB(p.maxMemoryMB || 500)
+    setHealthcheckPath(p.healthcheckPath || '/health')
+    setDomainsInput((p.domains || []).join(', '))
+    setRuntime(p.runtime)
+    setAutoStart(p.autoStart)
+    setDataPathsInput((p.dataPaths || []).join(', '))
+    setDetectedBadge(null)
+
+    try {
+      const env = await window.api.getProjectEnv(p.id)
+      const lines = Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n')
+      setEnvInput(lines || 'NODE_ENV=production')
+    } catch {
+      setEnvInput('NODE_ENV=production')
+    }
+
+    setIsCreateModalOpen(true)
+  }
+
+  const handleAddDomainPill = (host: string) => {
+    const current = domainsInput
+      .split(/[,\s]+/)
+      .map((d) => d.trim())
+      .filter(Boolean)
+    if (!current.includes(host)) {
+      setDomainsInput([...current, host].join(', '))
     }
   }
 
@@ -217,13 +274,20 @@ export const Projects: React.FC = () => {
         dataPaths
       }
 
-      const created = await window.api.createProject(input)
+      if (editingProjectId) {
+        await window.api.updateProject(editingProjectId, input)
+        toast.success('Projeto atualizado!', `Configurações de '${name}' salvas com sucesso.`)
+      } else {
+        const created = await window.api.createProject(input)
+        toast.success('Projeto criado com sucesso!', `'${name}' está pronto para ser executado.`)
+        openTerminal(created.id)
+      }
+
       setIsCreateModalOpen(false)
       resetForm()
       await loadProjects()
-      openTerminal(created.id)
     } catch (err) {
-      alert(`Erro ao criar projeto: ${(err as Error).message}`)
+      toast.error('Erro ao salvar projeto', (err as Error).message)
     } finally {
       setSubmitting(false)
     }
@@ -240,6 +304,7 @@ export const Projects: React.FC = () => {
     setApiProxyTarget('')
     setDomainsInput('')
     setEnvInput('NODE_ENV=production')
+    setDetectedBadge(null)
   }
 
   const handleStart = async (id: string) => {
@@ -247,8 +312,9 @@ export const Projects: React.FC = () => {
       await window.api.startProject(id)
       openTerminal(id)
       loadProjects()
+      toast.success('Projeto iniciado')
     } catch (err) {
-      alert(`Falha ao iniciar: ${(err as Error).message}`)
+      toast.error('Falha ao iniciar', (err as Error).message)
     }
   }
 
@@ -256,8 +322,9 @@ export const Projects: React.FC = () => {
     try {
       await window.api.stopProject(id)
       loadProjects()
+      toast.info('Projeto parado')
     } catch (err) {
-      alert(`Falha ao parar: ${(err as Error).message}`)
+      toast.error('Falha ao parar', (err as Error).message)
     }
   }
 
@@ -266,8 +333,9 @@ export const Projects: React.FC = () => {
       await window.api.restartProject(id)
       openTerminal(id)
       loadProjects()
+      toast.success('Projeto reiniciado')
     } catch (err) {
-      alert(`Falha ao reiniciar: ${(err as Error).message}`)
+      toast.error('Falha ao reiniciar', (err as Error).message)
     }
   }
 
@@ -276,19 +344,26 @@ export const Projects: React.FC = () => {
       openTerminal(id)
       await window.api.redeployProject(id)
       loadProjects()
+      toast.success('Redeploy executado')
     } catch (err) {
-      alert(`Falha no redeploy: ${(err as Error).message}`)
+      toast.error('Falha no redeploy', (err as Error).message)
     }
   }
 
   const handleDelete = async (id: string, projName: string) => {
-    if (!confirm(`Deseja realmente remover o projeto '${projName}'?`)) return
+    const ok = await toast.confirm(`Deseja realmente remover o projeto '${projName}'?`, {
+      title: 'Remover Projeto',
+      confirmLabel: 'Remover',
+      danger: true
+    })
+    if (!ok) return
     try {
       await window.api.deleteProject(id)
       if (activeLogProjectId === id) setActiveLogProjectId(null)
       loadProjects()
+      toast.success('Projeto removido')
     } catch (err) {
-      alert(`Erro ao remover: ${(err as Error).message}`)
+      toast.error('Erro ao remover', (err as Error).message)
     }
   }
 
@@ -296,9 +371,9 @@ export const Projects: React.FC = () => {
     try {
       const port = project.port || 80
       await window.api.startQuickTunnel(port, project.id, `Túnel para ${project.name}`)
-      alert(`Túnel rápido solicitado para ${project.name}! Verifique na aba 'Rede & Tunnels' para ver o link e o QR Code.`)
+      toast.success('Quick Tunnel solicitado', 'Verifique o link gerado e o QR Code na aba Roteamento.')
     } catch (err) {
-      alert(`Falha ao gerar túnel: ${(err as Error).message}`)
+      toast.error('Falha ao gerar túnel', (err as Error).message)
     }
   }
 
@@ -323,7 +398,7 @@ export const Projects: React.FC = () => {
             <span>📖 Guia Rápido de Deploy</span>
           </button>
           <button
-            onClick={() => setIsCreateModalOpen(true)}
+            onClick={openCreateModal}
             className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-semibold text-xs flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/20"
           >
             <Plus size={16} />
@@ -345,7 +420,7 @@ export const Projects: React.FC = () => {
             Conecte uma pasta local ou repositório Git para iniciar sua primeira API com alocação automática de porta e monitoramento de saúde.
           </p>
           <button
-            onClick={() => setIsCreateModalOpen(true)}
+            onClick={openCreateModal}
             className="px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-medium text-xs flex items-center gap-2 transition-colors border border-neutral-700"
           >
             <Plus size={16} />
@@ -474,6 +549,14 @@ export const Projects: React.FC = () => {
                   </button>
 
                   <button
+                    onClick={() => openEditModal(p)}
+                    className="p-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-emerald-400 border border-neutral-800 transition-colors"
+                    title="Editar configurações do projeto"
+                  >
+                    <Edit2 size={15} />
+                  </button>
+
+                  <button
                     onClick={() => handleDelete(p.id, p.name)}
                     className="p-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-500 hover:text-rose-400 border border-neutral-800 transition-colors"
                     title="Remover projeto"
@@ -525,12 +608,16 @@ export const Projects: React.FC = () => {
         </div>
       )}
 
-      {/* Modal de Criação de Projeto */}
+      {/* Modal de Criação / Edição de Projeto */}
       <Modal
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
-        title="Cadastrar Novo Projeto (Mini-Vercel)"
-        subtitle="Configure a origem, stack, variáveis de ambiente e regras de auto-recuperação da API."
+        title={editingProjectId ? 'Editar Configurações do Projeto' : 'Cadastrar Novo Projeto (Mini-Vercel)'}
+        subtitle={
+          editingProjectId
+            ? 'Atualize portas, domínios vinculados, comandos ou variáveis de ambiente da aplicação.'
+            : 'Configure a origem, stack, variáveis de ambiente e regras de auto-recuperação da API.'
+        }
         maxWidth="2xl"
       >
         <form onSubmit={handleCreate} className="space-y-4">
@@ -882,6 +969,37 @@ export const Projects: React.FC = () => {
               placeholder="api.meudominio.com, app.localhost"
               className="w-full px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 text-white text-xs font-mono focus:border-emerald-500 focus:outline-none"
             />
+            {/* Pílulas de domínios rápidos cadastrados na Central de Domínios */}
+            {domains && domains.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] text-neutral-500 font-medium">Atalhos da Central de Domínios:</span>
+                {domains.map((d) => {
+                  const suggestions = [
+                    d.domain,
+                    `api.${d.domain}`,
+                    `app.${d.domain}`,
+                    ...(d.subdomains?.map((s) => s.fullHostname) || [])
+                  ]
+                  const unique = Array.from(new Set(suggestions))
+                  return (
+                    <div key={d.id} className="contents">
+                      {unique.map((sug) => (
+                        <button
+                          key={sug}
+                          type="button"
+                          onClick={() => handleAddDomainPill(sug)}
+                          className="px-2 py-0.5 rounded-md bg-neutral-900 hover:bg-emerald-950/60 border border-neutral-800 hover:border-emerald-500/40 text-[11px] font-mono text-neutral-400 hover:text-emerald-300 transition-colors flex items-center gap-1"
+                          title={`Adicionar ${sug} aos domínios do projeto`}
+                        >
+                          <span className="text-emerald-500 font-bold">+</span>
+                          <span>{sug}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
 
           {stack === 'static' && (
@@ -1052,7 +1170,7 @@ export const Projects: React.FC = () => {
               disabled={submitting}
               className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-semibold text-xs transition-colors disabled:opacity-50"
             >
-              {submitting ? 'Criando...' : 'Salvar e Fazer Deploy'}
+              {submitting ? 'Salvando...' : editingProjectId ? 'Salvar Alterações' : 'Salvar e Fazer Deploy'}
             </button>
           </div>
         </form>

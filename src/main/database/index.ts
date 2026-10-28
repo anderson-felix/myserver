@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createLogger } from '../utils/logger'
 import { encryptJson, decryptJson, encrypt, decrypt } from '../utils/crypto'
+import { decodeTunnelToken, extractTunnelToken } from '../utils/cloudflareToken'
 import type {
   Project,
   ProjectInput,
@@ -11,7 +12,9 @@ import type {
   Incident,
   BackupRecord,
   LinuxNode,
-  LinuxNodeInput
+  LinuxNodeInput,
+  DomainRecord,
+  DomainSubdomain
 } from '@shared/types'
 
 const log = createLogger('database')
@@ -124,6 +127,24 @@ export class AppDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_system_logs_ts ON system_logs(ts DESC);
+
+      CREATE TABLE IF NOT EXISTS domains (
+        id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL UNIQUE,
+        registrar TEXT NOT NULL DEFAULT 'other',
+        connectionMode TEXT NOT NULL DEFAULT 'cloudflare_tunnel',
+        targetProjectId TEXT,
+        subdomainsJson TEXT NOT NULL DEFAULT '[]',
+        cfZoneId TEXT,
+        cfTunnelId TEXT,
+        cfTunnelCname TEXT,
+        dnsVerified INTEGER NOT NULL DEFAULT 0,
+        sslStatus TEXT NOT NULL DEFAULT 'pending',
+        lastCheckedAt INTEGER,
+        notes TEXT,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
     `)
 
     try {
@@ -189,6 +210,9 @@ export class AppDatabase {
     const telegramBotToken = this.getSecret('telegram_bot_token')
     const backupPass = this.getSecret('backup_passphrase')
     const s3Secret = this.getSecret('s3_secret')
+    const namedToken = this.getSecret('cloudflare_named_token')
+    const cfApiToken = this.getSecret('cloudflare_api_token')
+    const tunnelId = this.getSetting<string | null>('tunnel_id', null)
 
     const mask = (v: string | null) => (v ? `${v.slice(0, 16)}••••••${v.slice(-4)}` : '')
 
@@ -248,7 +272,15 @@ export class AppDatabase {
         runnerConfigured: this.getSetting('hardening_runnerConfigured', false)
       },
       tunnel: {
-        namedConfiguredAt: this.getSetting<number | null>('tunnel_namedConfiguredAt', null)
+        namedConfiguredAt: this.getSetting<number | null>('tunnel_namedConfiguredAt', null),
+        namedTokenSet: !!namedToken,
+        namedTokenMasked: mask(namedToken),
+        namedToken: namedToken || '',
+        tunnelId: tunnelId || null,
+        accountId: this.getSetting<string | null>('tunnel_account_id', null) || null,
+        tunnelCname: tunnelId ? `${tunnelId}.cfargotunnel.com` : null,
+        cloudflareApiTokenSet: !!cfApiToken,
+        cloudflareApiTokenMasked: mask(cfApiToken)
       }
     }
 
@@ -300,6 +332,31 @@ export class AppDatabase {
         this.setSecret('backup_passphrase', update.backup.passphrase)
       }
     }
+
+    if (update.tunnel) {
+      if (update.tunnel.cloudflareApiToken !== undefined) {
+        this.setSecret('cloudflare_api_token', update.tunnel.cloudflareApiToken)
+      }
+    }
+  }
+
+  /**
+   * Salva o token do Named Tunnel no cofre e extrai automaticamente tunnelId/accountId
+   * do payload Base64 ({ a, t, s }). `null` apaga token e metadados.
+   */
+  public setNamedTunnelToken(rawToken: string | null): { tunnelId: string | null; accountId: string | null } {
+    if (rawToken === null || !rawToken.trim()) {
+      this.setSecret('cloudflare_named_token', null)
+      this.setSetting('tunnel_id', null)
+      this.setSetting('tunnel_account_id', null)
+      return { tunnelId: null, accountId: null }
+    }
+    const token = extractTunnelToken(rawToken)
+    const decoded = decodeTunnelToken(token)
+    this.setSecret('cloudflare_named_token', token)
+    this.setSetting('tunnel_id', decoded?.tunnelId ?? null)
+    this.setSetting('tunnel_account_id', decoded?.accountId || null)
+    return { tunnelId: decoded?.tunnelId ?? null, accountId: decoded?.accountId || null }
   }
 
   // -------------------------------------------------------------------------
@@ -618,6 +675,120 @@ export class AppDatabase {
 
   public deleteLinuxNode(id: string): void {
     this.db.prepare('DELETE FROM linux_nodes WHERE id = ?').run(id)
+  }
+
+  // -------------------------------------------------------------------------
+  // Domínios Próprios (Central de Domínios)
+  // -------------------------------------------------------------------------
+  public listDomains(): DomainRecord[] {
+    const rows = this.db.prepare('SELECT * FROM domains ORDER BY domain ASC').all() as any[]
+    return rows.map((r) => this.mapDomain(r))
+  }
+
+  public getDomain(id: string): DomainRecord | null {
+    const row = this.db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as any
+    return row ? this.mapDomain(row) : null
+  }
+
+  public getDomainByName(domain: string): DomainRecord | null {
+    const row = this.db.prepare('SELECT * FROM domains WHERE domain = ?').get(domain.toLowerCase()) as any
+    return row ? this.mapDomain(row) : null
+  }
+
+  /** Insere ou substitui integralmente um registro de domínio. */
+  public upsertDomain(d: Omit<DomainRecord, 'instructions'>): void {
+    this.db.prepare(`
+      INSERT INTO domains (
+        id, domain, registrar, connectionMode, targetProjectId, subdomainsJson, cfZoneId, cfTunnelId,
+        cfTunnelCname, dnsVerified, sslStatus, lastCheckedAt, notes, createdAt, updatedAt
+      ) VALUES (
+        @id, @domain, @registrar, @connectionMode, @targetProjectId, @subdomainsJson, @cfZoneId, @cfTunnelId,
+        @cfTunnelCname, @dnsVerified, @sslStatus, @lastCheckedAt, @notes, @createdAt, @updatedAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        domain = excluded.domain,
+        registrar = excluded.registrar,
+        connectionMode = excluded.connectionMode,
+        targetProjectId = excluded.targetProjectId,
+        subdomainsJson = excluded.subdomainsJson,
+        cfZoneId = excluded.cfZoneId,
+        cfTunnelId = excluded.cfTunnelId,
+        cfTunnelCname = excluded.cfTunnelCname,
+        dnsVerified = excluded.dnsVerified,
+        sslStatus = excluded.sslStatus,
+        lastCheckedAt = excluded.lastCheckedAt,
+        notes = excluded.notes,
+        updatedAt = excluded.updatedAt
+    `).run({
+      id: d.id,
+      domain: d.domain.toLowerCase(),
+      registrar: d.registrar,
+      connectionMode: d.connectionMode,
+      targetProjectId: d.targetProjectId ?? null,
+      subdomainsJson: JSON.stringify(d.subdomains ?? []),
+      cfZoneId: d.cfZoneId ?? null,
+      cfTunnelId: d.cfTunnelId ?? null,
+      cfTunnelCname: d.cfTunnelCname ?? null,
+      dnsVerified: d.dnsVerified ? 1 : 0,
+      sslStatus: d.sslStatus,
+      lastCheckedAt: d.lastCheckedAt ?? null,
+      notes: d.notes ?? null,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt
+    })
+  }
+
+  public updateDomainFields(
+    id: string,
+    partial: Partial<Pick<DomainRecord, 'dnsVerified' | 'sslStatus' | 'lastCheckedAt' | 'cfZoneId' | 'cfTunnelId' | 'cfTunnelCname' | 'targetProjectId' | 'subdomains'>>
+  ): void {
+    const fields: string[] = ['updatedAt = ?']
+    const values: any[] = [Date.now()]
+    if (partial.dnsVerified !== undefined) { fields.push('dnsVerified = ?'); values.push(partial.dnsVerified ? 1 : 0) }
+    if (partial.sslStatus !== undefined) { fields.push('sslStatus = ?'); values.push(partial.sslStatus) }
+    if (partial.lastCheckedAt !== undefined) { fields.push('lastCheckedAt = ?'); values.push(partial.lastCheckedAt) }
+    if (partial.cfZoneId !== undefined) { fields.push('cfZoneId = ?'); values.push(partial.cfZoneId) }
+    if (partial.cfTunnelId !== undefined) { fields.push('cfTunnelId = ?'); values.push(partial.cfTunnelId) }
+    if (partial.cfTunnelCname !== undefined) { fields.push('cfTunnelCname = ?'); values.push(partial.cfTunnelCname) }
+    if (partial.targetProjectId !== undefined) { fields.push('targetProjectId = ?'); values.push(partial.targetProjectId) }
+    if (partial.subdomains !== undefined) { fields.push('subdomainsJson = ?'); values.push(JSON.stringify(partial.subdomains)) }
+    values.push(id)
+    this.db.prepare(`UPDATE domains SET ${fields.join(', ')} WHERE id = ?`).run(...values)
+  }
+
+  public deleteDomain(id: string): void {
+    this.db.prepare('DELETE FROM domains WHERE id = ?').run(id)
+  }
+
+  /** Executa um bloco de operações em uma única transação SQLite. */
+  public transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)()
+  }
+
+  private mapDomain(r: any): DomainRecord {
+    let subdomains: DomainSubdomain[] = []
+    try {
+      subdomains = JSON.parse(r.subdomainsJson || '[]')
+    } catch {
+      subdomains = []
+    }
+    return {
+      id: r.id,
+      domain: r.domain,
+      registrar: r.registrar,
+      connectionMode: r.connectionMode,
+      targetProjectId: r.targetProjectId ?? null,
+      subdomains,
+      cfZoneId: r.cfZoneId ?? null,
+      cfTunnelId: r.cfTunnelId ?? null,
+      cfTunnelCname: r.cfTunnelCname ?? null,
+      dnsVerified: r.dnsVerified === 1,
+      sslStatus: r.sslStatus,
+      lastCheckedAt: r.lastCheckedAt ?? null,
+      notes: r.notes ?? null,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt
+    }
   }
 
   public close(): void {

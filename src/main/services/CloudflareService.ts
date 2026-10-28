@@ -5,6 +5,7 @@ import { createLogger } from '../utils/logger'
 import { binaryPath, binaryPresent } from '../paths'
 import { runPrivileged, getServicesStatus, psQuote } from '../utils/shell'
 import { broadcast, createLineSplitter } from '../utils/common'
+import { decodeTunnelToken, extractTunnelToken } from '../utils/cloudflareToken'
 import { IPC, type QuickTunnel, type TunnelStatus } from '@shared/types'
 import type { AppDatabase } from '../database'
 import type { NotificationService } from './NotificationService'
@@ -42,6 +43,7 @@ export class CloudflareService {
     }
 
     const settings = this.db.getFullSettings()
+    const t = settings.tunnel
 
     return {
       binaryPresent: isPresent,
@@ -49,7 +51,14 @@ export class CloudflareService {
       named: {
         installed: namedSvcState.installed,
         state: namedSvcState.state,
-        configuredAt: settings.tunnel.namedConfiguredAt
+        configuredAt: t.namedConfiguredAt,
+        namedTokenSet: t.namedTokenSet,
+        namedTokenMasked: t.namedTokenMasked,
+        namedToken: t.namedToken,
+        tunnelId: t.tunnelId,
+        accountId: t.accountId,
+        tunnelCname: t.tunnelCname,
+        cloudflareApiTokenSet: t.cloudflareApiTokenSet
       }
     }
   }
@@ -155,8 +164,18 @@ export class CloudflareService {
       throw new Error('Binário cloudflared.exe não encontrado')
     }
 
-    const trimmed = token.trim()
+    const trimmed = extractTunnelToken(token)
     if (!trimmed) throw new Error('Token do Cloudflare Tunnel não informado')
+
+    const decoded = decodeTunnelToken(trimmed)
+    if (!decoded) {
+      throw new Error('Token inválido: o token do conector deve começar com "eyJ" e conter o ID do túnel (copie-o do painel Zero Trust > Networks > Tunnels).')
+    }
+
+    // Persiste no cofre criptografado ANTES da instalação: se o UAC for cancelado o token não se perde
+    this.db.setNamedTunnelToken(trimmed)
+    this.syncTunnelIntoDomains(decoded.tunnelId, decoded.tunnelCname)
+    log.info(`Token do Named Tunnel salvo no cofre (tunnelId=${decoded.tunnelId})`)
 
     log.info('Instalando Named Tunnel persistente do Cloudflare...')
     const exe = binaryPath('cloudflared')
@@ -200,5 +219,15 @@ export class CloudflareService {
     await runPrivileged(script)
     this.cachedNamedSvc = null
     this.db.setSetting('tunnel_namedConfiguredAt', null)
+    // O token permanece no cofre para permitir reinstalação em 1 clique
+  }
+
+  /** Propaga tunnelId/CNAME para os domínios em modo cloudflare_tunnel. */
+  private syncTunnelIntoDomains(tunnelId: string, tunnelCname: string): void {
+    for (const d of this.db.listDomains()) {
+      if (d.connectionMode === 'cloudflare_tunnel' && d.cfTunnelId !== tunnelId) {
+        this.db.updateDomainFields(d.id, { cfTunnelId: tunnelId, cfTunnelCname: tunnelCname })
+      }
+    }
   }
 }

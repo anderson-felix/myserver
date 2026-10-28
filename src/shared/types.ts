@@ -42,6 +42,15 @@ export const IPC = {
   tunnelStatus: 'tunnel:status',
   tunnelOnUpdate: 'tunnel:on-update',
 
+  // Central de Domínios Próprios
+  domainsList: 'domains:list',
+  domainsSave: 'domains:save',
+  domainsDelete: 'domains:delete',
+  domainsVerifyDns: 'domains:verify-dns',
+  domainsApplyHosts: 'domains:apply-hosts',
+  domainsNetworkEndpoints: 'domains:network-endpoints',
+  domainsCloudflareAutoDns: 'domains:cloudflare-auto-dns',
+
   // Proxy Caddy
   proxySyncRoutes: 'proxy:sync-routes',
   proxyStatus: 'proxy:status',
@@ -297,6 +306,7 @@ export type SystemLogModule =
   | 'ssh'
   | 'backup'
   | 'notifications'
+  | 'domains'
   | 'system'
 
 export interface SystemLogEntry {
@@ -350,6 +360,16 @@ export interface NamedTunnelStatus {
   installed: boolean
   state: string | null
   configuredAt: number | null
+  /** Token do conector salvo no cofre criptografado */
+  namedTokenSet: boolean
+  namedTokenMasked: string
+  namedToken: string
+  /** Extraídos automaticamente do payload Base64 do token ({ a, t, s }) */
+  tunnelId: string | null
+  accountId: string | null
+  /** <tunnelId>.cfargotunnel.com */
+  tunnelCname: string | null
+  cloudflareApiTokenSet: boolean
 }
 
 export interface TunnelStatus {
@@ -472,6 +492,14 @@ export interface AppSettings {
   }
   tunnel: {
     namedConfiguredAt: number | null
+    namedTokenSet: boolean
+    namedTokenMasked: string
+    namedToken: string
+    tunnelId: string | null
+    accountId: string | null
+    tunnelCname: string | null
+    cloudflareApiTokenSet: boolean
+    cloudflareApiTokenMasked: string
   }
 }
 
@@ -501,6 +529,156 @@ export interface SettingsUpdate {
     localDir?: string
     passphrase?: string | null
   }
+  tunnel?: {
+    /** Somente escrita: undefined = manter · null/'' = apagar · string = definir */
+    cloudflareApiToken?: string | null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Central de Domínios Próprios (Registro.br, GoDaddy, Cloudflare, Local...)
+// ---------------------------------------------------------------------------
+export type DomainRegistrar = 'registrobr' | 'godaddy' | 'cloudflare' | 'hostinger' | 'namecheap' | 'other'
+
+/**
+ * cloudflare_tunnel = cloudflared → http://127.0.0.1:80 (Caddy) · sem portas abertas, fura CGNAT
+ * direct_dns        = registro A para o IP público + port forwarding 80/443
+ * lan_only          = arquivo hosts do Windows / intranet (.local, .localhost)
+ */
+export type DomainConnectionMode = 'cloudflare_tunnel' | 'direct_dns' | 'lan_only'
+
+export type DomainSslStatus = 'pending' | 'active' | 'error'
+
+export interface DomainSubdomain {
+  id: string
+  /** Rótulo relativo (ex: "api", "app", "painel.admin") */
+  subdomain: string
+  /** Hostname completo (ex: "api.minhaempresa.com.br") */
+  fullHostname: string
+  projectId: string | null
+  /** Porta local alternativa quando não há projeto vinculado (ex: serviço externo em :8080) */
+  targetPort: number | null
+}
+
+export interface DnsRecordInstruction {
+  type: 'A' | 'CNAME' | 'HOSTS'
+  /** Nome/Host relativo como o painel do provedor espera (@, www, api...) */
+  host: string
+  /** Hostname completo correspondente */
+  hostname: string
+  value: string
+  ttl: string
+  /** Somente Cloudflare: nuvem laranja (proxied) */
+  proxied?: boolean
+  note?: string
+}
+
+export interface TunnelIngressInstruction {
+  hostname: string
+  service: string
+  projectName: string | null
+}
+
+export interface DomainDnsInstructions {
+  mode: DomainConnectionMode
+  registrarLabel: string
+  panelUrl: string | null
+  /** Passo a passo específico do provedor */
+  steps: string[]
+  records: DnsRecordInstruction[]
+  /** Public Hostnames do Cloudflare Tunnel (somente modo cloudflare_tunnel) */
+  tunnelIngress: TunnelIngressInstruction[]
+  /** Linha pronta para o arquivo hosts (somente lan_only) */
+  hostsLine: string | null
+  warnings: string[]
+}
+
+export interface DomainRecord {
+  id: string
+  domain: string
+  registrar: DomainRegistrar
+  connectionMode: DomainConnectionMode
+  /** Projeto vinculado ao domínio raiz (@ e www) */
+  targetProjectId: string | null
+  subdomains: DomainSubdomain[]
+  cfZoneId: string | null
+  cfTunnelId: string | null
+  cfTunnelCname: string | null
+  dnsVerified: boolean
+  sslStatus: DomainSslStatus
+  lastCheckedAt: number | null
+  notes: string | null
+  createdAt: number
+  updatedAt: number
+  /** Calculado pelo DomainService (não persistido) */
+  instructions?: DomainDnsInstructions
+}
+
+export interface DomainInput {
+  /** Ausente = criar · presente = editar */
+  id?: string
+  domain: string
+  registrar: DomainRegistrar
+  connectionMode: DomainConnectionMode
+  targetProjectId?: string | null
+  subdomains: Array<{ id?: string; subdomain: string; projectId: string | null; targetPort?: number | null }>
+  notes?: string | null
+}
+
+export interface NetworkEndpoints {
+  publicIp: string | null
+  lanIp: string | null
+  caddyHttpPort: number
+  tunnelId: string | null
+  tunnelCname: string | null
+  fetchedAt: number
+}
+
+export interface DnsHostCheck {
+  hostname: string
+  aRecords: string[]
+  cnameRecords: string[]
+  resolved: boolean
+  pointsToExpected: boolean
+  /** Algum certificado TLS válido respondeu em https:// */
+  httpsReachable: boolean
+  httpStatus: number | null
+  error: string | null
+}
+
+export interface DnsDiagnosticStep {
+  label: string
+  ok: boolean
+  detail: string
+}
+
+export interface DomainDnsVerification {
+  domainId: string
+  domain: string
+  nsRecords: string[]
+  nsProvider: string | null
+  isCloudflareNs: boolean
+  aRecords: string[]
+  cnameRecords: string[]
+  httpsReachable: boolean
+  hosts: DnsHostCheck[]
+  dnsVerified: boolean
+  sslStatus: DomainSslStatus
+  steps: DnsDiagnosticStep[]
+  diagnosticMessage: string
+  checkedAt: number
+}
+
+export interface HostsApplyResult {
+  hostsPath: string
+  entries: string[]
+}
+
+export interface CloudflareAutoDnsResult {
+  zoneId: string
+  records: Array<{ hostname: string; action: 'created' | 'updated' | 'unchanged' | 'failed'; error?: string }>
+  ingressUpdated: boolean
+  ingressError: string | null
 }
 
 // ---------------------------------------------------------------------------

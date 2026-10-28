@@ -1,7 +1,7 @@
 {
   "name": "myserver-orchestrator",
   "productName": "MyServer Orchestrator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Transforma qualquer PC/Notebook em um servidor Web e de APIs seguro, resiliente e de baixo consumo (Local-First & Zero-Cost).",
   "main": "./out/main/index.js",
   "author": "DarkLabs",

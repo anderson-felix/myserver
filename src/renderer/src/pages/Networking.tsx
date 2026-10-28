@@ -128,17 +128,33 @@ export const Networking: React.FC = () => {
   }
 
   useEffect(() => {
-    loadData()
-    const interval = setInterval(() => {
-      if (!document.hidden) loadData()
-    }, 4000)
+    let active = true
+    let timer: NodeJS.Timeout | null = null
+
+    const schedulePoll = () => {
+      if (!active) return
+      timer = setTimeout(async () => {
+        if (!active) return
+        if (!document.hidden) {
+          try {
+            await loadData()
+          } catch {
+            // Silêncio
+          }
+        }
+        schedulePoll()
+      }, 5000)
+    }
+
+    loadData().finally(() => schedulePoll())
 
     const unsubTunnel = window.api.onTunnelUpdate(() => {
       loadData()
     })
 
     return () => {
-      clearInterval(interval)
+      active = false
+      if (timer) clearTimeout(timer)
       unsubTunnel()
     }
   }, [])
@@ -317,10 +333,13 @@ export const Networking: React.FC = () => {
         notes: formNotes
       }
 
-      await window.api.saveDomain(input)
+      const saved = await window.api.saveDomain(input)
       toast.success(editingDomainId ? 'Domínio atualizado!' : 'Domínio configurado com sucesso!')
       setIsDomainModalOpen(false)
-      loadData()
+      await loadData()
+      if (!editingDomainId && saved) {
+        setInstructionsDomain(saved)
+      }
     } catch (err) {
       toast.error('Falha ao salvar domínio', (err as Error).message)
     } finally {
@@ -375,7 +394,12 @@ export const Networking: React.FC = () => {
       const res = await window.api.autoConfigureCloudflareDns(domainId, cfApiTokenInput.trim() || undefined)
       setAutoDnsResult(res)
       toast.success('Automação Cloudflare concluída', 'CNAMEs e ingress do túnel foram atualizados com sucesso.')
-      loadData()
+      await loadData()
+      setDomains((current) => {
+        const found = current.find((d) => d.id === domainId)
+        if (found) setInstructionsDomain(found)
+        return current
+      })
     } catch (err) {
       toast.error('Falha na automação Cloudflare', (err as Error).message)
     } finally {
@@ -1531,6 +1555,26 @@ export const Networking: React.FC = () => {
                 </div>
               </div>
             )}
+
+            {/* Rodapé com Ação Direta de Verificação */}
+            <div className="pt-4 border-t border-neutral-800 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setInstructionsDomain(null)}
+                className="px-4 py-2 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-xs transition-colors"
+              >
+                Fechar Guia
+              </button>
+              <button
+                type="button"
+                onClick={() => handleVerifyDns(instructionsDomain.id)}
+                disabled={verifyingDomainId === instructionsDomain.id}
+                className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs flex items-center gap-2 transition-colors disabled:opacity-50 shadow-lg shadow-cyan-600/20"
+              >
+                <RefreshCw size={13} className={verifyingDomainId === instructionsDomain.id ? 'animate-spin' : ''} />
+                <span>🔍 Verificar Propagação DNS & HTTPS Agora</span>
+              </button>
+            </div>
           </div>
         )}
       </Modal>

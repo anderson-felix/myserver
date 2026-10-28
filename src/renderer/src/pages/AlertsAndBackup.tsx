@@ -14,11 +14,13 @@ import {
   Bot,
   BookOpen,
   HelpCircle,
-  Zap
+  Zap,
+  FolderOpen
 } from 'lucide-react'
 import { Badge } from '../components/Badge'
 import { HelpDrawer } from '../components/HelpDrawer'
 import { InfoTooltip } from '../components/InfoTooltip'
+import { useToast } from '../components/Toast'
 import type { AppSettings, BackupRecord, BackupProgress, S3Config, NotificationChannel, ChannelTestResult } from '@shared/types'
 
 type HelpTopic = 'overview' | 'discord' | 'teams' | 'slack' | 'telegram' | 'r2'
@@ -26,6 +28,7 @@ type HelpTopic = 'overview' | 'discord' | 'teams' | 'slack' | 'telegram' | 'r2'
 export const AlertsAndBackup: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [backups, setBackups] = useState<BackupRecord[]>([])
+  const toast = useToast()
 
   // Help Drawer
   const [isHelpOpen, setIsHelpOpen] = useState(false)
@@ -345,7 +348,22 @@ export const AlertsAndBackup: React.FC = () => {
       }
     })
 
-    return () => unsubProgress()
+    const unsubSettings = window.api.onSettingsUpdated((newSettings) => {
+      setSettings(newSettings)
+      if (newSettings.notifications.telegramChatId) {
+        setTelegramChatId(newSettings.notifications.telegramChatId)
+        setTelegramEnabled(newSettings.notifications.telegramEnabled ?? true)
+        toast.success(
+          'Bot do Telegram vinculado automaticamente!',
+          `Chat ID ${newSettings.notifications.telegramChatId} detectado via /start.`
+        )
+      }
+    })
+
+    return () => {
+      unsubProgress()
+      unsubSettings()
+    }
   }, [])
 
   const handleSaveWebhooks = async (e: React.FormEvent) => {
@@ -373,10 +391,10 @@ export const AlertsAndBackup: React.FC = () => {
       }
 
       await window.api.updateSettings(updatePayload)
-      alert('Configurações de alerta salvas com sucesso!')
+      toast.success('Configurações de alerta salvas com sucesso!')
       await loadData()
     } catch (err) {
-      alert(`Erro ao salvar: ${(err as Error).message}`)
+      toast.error('Erro ao salvar', (err as Error).message)
     } finally {
       setSavingWebhooks(false)
     }
@@ -433,7 +451,7 @@ export const AlertsAndBackup: React.FC = () => {
         await loadData()
       }
     } catch (err) {
-      alert(`Falha no teste geral: ${(err as Error).message}`)
+      toast.error('Falha no teste geral', (err as Error).message)
     } finally {
       setTestingAll(false)
     }
@@ -445,10 +463,16 @@ export const AlertsAndBackup: React.FC = () => {
       const res = await window.api.detectTelegramChat(telegramBotToken.trim() || undefined)
       setTelegramChatId(res.chatId)
       setTelegramEnabled(true)
-      alert(`Chat ID detectado com sucesso!\nID: ${res.chatId}\nUsuário: ${res.firstName || ''} (@${res.username || 'sem_username'})\n\nO bot foi vinculado e o canal Telegram foi ativado com sucesso!`)
+      toast.success(
+        'Chat ID detectado com sucesso!',
+        `ID: ${res.chatId} - Usuário: ${res.firstName || ''} (@${res.username || 'sem_username'}). Bot vinculado e canal ativado!`
+      )
       await loadData()
     } catch (err) {
-      alert(`Não foi possível detectar o Chat ID:\n${(err as Error).message}\n\nDica: Abra seu bot no Telegram e envie uma mensagem (ou comando /start) primeiro!`)
+      toast.warning(
+        'Não foi possível detectar o Chat ID',
+        `${(err as Error).message}. Abra o bot no Telegram e envie uma mensagem ou /start primeiro!`
+      )
     } finally {
       setDetectingTelegram(false)
     }
@@ -459,9 +483,12 @@ export const AlertsAndBackup: React.FC = () => {
     try {
       await persistCurrentNotifications()
       await window.api.simulatePowerOutage()
-      alert('Simulação de queda de energia disparada com sucesso!\nO alerta de ativação do No-Break Nativo foi emitido para todos os seus canais configurados.')
+      toast.success(
+        'Simulação de queda de energia disparada',
+        'O alerta de No-Break Nativo foi emitido para todos os canais configurados.'
+      )
     } catch (err) {
-      alert(`Falha ao simular queda de energia: ${(err as Error).message}`)
+      toast.error('Falha ao simular queda de energia', (err as Error).message)
     } finally {
       setSimulatingPowerOutage(false)
     }
@@ -489,16 +516,16 @@ export const AlertsAndBackup: React.FC = () => {
         setBackupPassphrase('')
       }
       setS3SecretAccessKey('')
-      alert('Configurações de backup e nuvem S3 salvas!')
+      toast.success('Configurações salvas', 'Parâmetros de backup e nuvem S3 atualizados!')
       loadData()
     } catch (err) {
-      alert(`Erro ao salvar configurações de S3: ${(err as Error).message}`)
+      toast.error('Erro ao salvar configurações de S3', (err as Error).message)
     }
   }
 
   const handleTestS3 = async () => {
     if (!s3SecretAccessKey.trim() && !settings?.backup.s3.secretSet) {
-      alert('Informe a Secret Access Key para realizar o teste de conexão.')
+      toast.warning('Chave necessária', 'Informe a Secret Access Key para realizar o teste de conexão.')
       return
     }
     setTestingS3(true)
@@ -512,9 +539,9 @@ export const AlertsAndBackup: React.FC = () => {
         prefix: s3Prefix.trim(),
         secretAccessKey: s3SecretAccessKey.trim()
       })
-      alert('Conexão ao Bucket S3 / Cloudflare R2 validada com sucesso!')
+      toast.success('Conexão S3/R2 validada com sucesso!')
     } catch (err) {
-      alert(`Falha no teste S3: ${(err as Error).message}`)
+      toast.error('Falha no teste S3', (err as Error).message)
     } finally {
       setTestingS3(false)
     }
@@ -524,11 +551,35 @@ export const AlertsAndBackup: React.FC = () => {
     setRunningBackup(true)
     try {
       await window.api.runBackupNow()
+      toast.success('Backup iniciado', 'O processo de compactação e criptografia está em andamento.')
       loadData()
     } catch (err) {
-      alert(`Erro durante backup: ${(err as Error).message}`)
+      toast.error('Erro durante backup', (err as Error).message)
     } finally {
       setRunningBackup(false)
+    }
+  }
+
+  const handleRestoreBackup = async (b: BackupRecord) => {
+    const ok = await toast.confirm(`Deseja restaurar o backup "${b.file.split(/[\\/]/).pop()}"?`, {
+      title: 'Restaurar Backup Criptografado',
+      confirmLabel: 'Restaurar',
+      danger: false
+    })
+    if (!ok) return
+    try {
+      const res = await window.api.restoreBackup(b.id, backupPassphrase.trim() || undefined)
+      toast.success('Backup restaurado com sucesso!', `Arquivos extraídos em: ${res.restoredTo}`)
+    } catch (err) {
+      toast.error('Falha ao restaurar backup', (err as Error).message)
+    }
+  }
+
+  const handleOpenBackupPath = async (filePath: string) => {
+    try {
+      await window.api.openPath(filePath)
+    } catch (err) {
+      toast.error('Erro ao abrir pasta', (err as Error).message)
     }
   }
 
@@ -1231,7 +1282,7 @@ export const AlertsAndBackup: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-3">
                     <span className="font-mono text-cyan-400">{(b.sizeBytes / (1024 * 1024)).toFixed(1)} MB</span>
                     <span
                       className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
@@ -1242,6 +1293,29 @@ export const AlertsAndBackup: React.FC = () => {
                     >
                       {b.uploaded ? 'Sincronizado Nuvem' : 'Apenas Local'}
                     </span>
+
+                    {b.status === 'ok' && (
+                      <div className="flex items-center gap-1.5 ml-1">
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreBackup(b)}
+                          className="px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-cyan-400 hover:text-cyan-300 border border-neutral-700 text-[11px] font-medium flex items-center gap-1.5 transition-colors"
+                          title="Restaurar este backup"
+                        >
+                          <RotateCw size={12} />
+                          <span>Restaurar Backup</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenBackupPath(b.file)}
+                          className="px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white border border-neutral-700 text-[11px] font-medium flex items-center gap-1.5 transition-colors"
+                          title="Abrir pasta onde o arquivo de backup está salvo"
+                        >
+                          <FolderOpen size={12} />
+                          <span>Abrir Pasta</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}

@@ -315,10 +315,9 @@ export class DomainService {
           if (existing) existing.projectId = project.id
           else subs.push({ id: genId('sub'), subdomain: relativeLabel(h, d.domain), fullHostname: h, projectId: project.id, targetPort: null })
         }
-        // Subdomínios que saíram do projeto: desvincula (remove se não tiver porta alternativa)
+        // Subdomínios que saíram do projeto: desvincula mantendo o registro na Central de Domínios
         subs = subs
           .map((s) => (s.projectId === project.id && !projHosts.includes(s.fullHostname) ? { ...s, projectId: null } : s))
-          .filter((s) => s.projectId || s.targetPort)
           .filter((s) => !(target && s.subdomain === 'www'))
 
         const subsChanged = JSON.stringify(subs) !== JSON.stringify(d.subdomains)

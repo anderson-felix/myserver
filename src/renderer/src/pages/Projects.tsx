@@ -18,7 +18,9 @@ import {
   Check,
   FileCode,
   Search,
-  Edit2
+  Edit2,
+  ExternalLink,
+  QrCode
 } from 'lucide-react'
 import { Badge } from '../components/Badge'
 import { Modal } from '../components/Modal'
@@ -26,11 +28,13 @@ import { XtermViewer } from '../components/XtermViewer'
 import { HelpDrawer } from '../components/HelpDrawer'
 import { InfoTooltip } from '../components/InfoTooltip'
 import { useToast } from '../components/Toast'
-import type { Project, ProjectInput, LogEvent, DomainRecord } from '@shared/types'
+import type { Project, ProjectInput, LogEvent, DomainRecord, TunnelStatus, QuickTunnel } from '@shared/types'
 
 export const Projects: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([])
   const [domains, setDomains] = useState<DomainRecord[]>([])
+  const [tunnelStatus, setTunnelStatus] = useState<TunnelStatus | null>(null)
+  const [activeQrModalTunnel, setActiveQrModalTunnel] = useState<QuickTunnel | null>(null)
   const [loading, setLoading] = useState(true)
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null)
@@ -55,6 +59,7 @@ export const Projects: React.FC = () => {
   const [maxMemoryMB, setMaxMemoryMB] = useState(500)
   const [healthcheckPath, setHealthcheckPath] = useState('/health')
   const [domainsInput, setDomainsInput] = useState('')
+  const [portInput, setPortInput] = useState('')
   const [envInput, setEnvInput] = useState('NODE_ENV=production')
   const [runtime, setRuntime] = useState<'child' | 'service'>('child')
   const [autoStart, setAutoStart] = useState(true)
@@ -123,12 +128,14 @@ export const Projects: React.FC = () => {
 
   const loadProjects = async () => {
     try {
-      const [list, doms] = await Promise.all([
+      const [list, doms, tun] = await Promise.all([
         window.api.listProjects(),
-        window.api.listDomains()
+        window.api.listDomains(),
+        window.api.getTunnelStatus()
       ])
       setProjects(list)
       setDomains(doms)
+      setTunnelStatus(tun)
     } catch (err) {
       console.error('Erro ao listar projetos ou domínios:', err)
     } finally {
@@ -137,10 +144,31 @@ export const Projects: React.FC = () => {
   }
 
   useEffect(() => {
-    loadProjects()
-    const interval = setInterval(loadProjects, 4000)
+    let active = true
+    let timer: NodeJS.Timeout | null = null
+
+    const schedulePoll = () => {
+      if (!active) return
+      timer = setTimeout(async () => {
+        if (!active) return
+        if (!document.hidden) {
+          try {
+            await loadProjects()
+          } catch {
+            // Silêncio
+          }
+        }
+        schedulePoll()
+      }, 4000)
+    }
+
+    loadProjects().finally(() => schedulePoll())
 
     const unsubStatus = window.api.onProjectStatus(() => {
+      loadProjects()
+    })
+
+    const unsubTunnel = window.api.onTunnelUpdate(() => {
       loadProjects()
     })
 
@@ -153,8 +181,10 @@ export const Projects: React.FC = () => {
     })
 
     return () => {
-      clearInterval(interval)
+      active = false
+      if (timer) clearTimeout(timer)
       unsubStatus()
+      unsubTunnel()
       unsubLogs()
     }
   }, [activeLogProjectId])
@@ -199,6 +229,7 @@ export const Projects: React.FC = () => {
     setMaxMemoryMB(p.maxMemoryMB || 500)
     setHealthcheckPath(p.healthcheckPath || '/health')
     setDomainsInput((p.domains || []).join(', '))
+    setPortInput(p.port ? String(p.port) : '')
     setRuntime(p.runtime)
     setAutoStart(p.autoStart)
     setDataPathsInput((p.dataPaths || []).join(', '))
@@ -254,6 +285,8 @@ export const Projects: React.FC = () => {
         .map((d) => d.trim())
         .filter(Boolean)
 
+      const parsedPort = portInput.trim() ? Number(portInput.trim()) : undefined
+
       const input: ProjectInput = {
         name,
         sourceType,
@@ -271,12 +304,24 @@ export const Projects: React.FC = () => {
         env,
         runtime,
         autoStart,
-        dataPaths
+        dataPaths,
+        port: parsedPort
       }
 
       if (editingProjectId) {
+        const prev = projects.find((p) => p.id === editingProjectId)
         await window.api.updateProject(editingProjectId, input)
         toast.success('Projeto atualizado!', `Configurações de '${name}' salvas com sucesso.`)
+        if (prev?.status === 'running') {
+          try {
+            await window.api.restartProject(editingProjectId)
+            toast.info('Aplicação reiniciada', 'Novas variáveis e rotas aplicadas imediatamente.')
+          } catch (err) {
+            console.warn('Erro ao reiniciar após update:', err)
+          }
+        } else {
+          await window.api.syncProxyRoutes()
+        }
       } else {
         const created = await window.api.createProject(input)
         toast.success('Projeto criado com sucesso!', `'${name}' está pronto para ser executado.`)
@@ -303,6 +348,7 @@ export const Projects: React.FC = () => {
     setSpaFallback(true)
     setApiProxyTarget('')
     setDomainsInput('')
+    setPortInput('')
     setEnvInput('NODE_ENV=production')
     setDetectedBadge(null)
   }
@@ -451,28 +497,40 @@ export const Projects: React.FC = () => {
                       <strong className="text-emerald-400">{p.port ? `:${p.port}` : 'Não alocada'}</strong>
                     </span>
                     {p.port && (
-                      <button
-                        onClick={async () => {
-                          const url = `http://127.0.0.1:${p.port}`
-                          await navigator.clipboard.writeText(url)
-                          setCopiedUrlProjId(p.id)
-                          setTimeout(() => setCopiedUrlProjId(null), 2000)
-                        }}
-                        className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white transition-colors text-[11px] font-mono"
-                        title="Copiar URL local de acesso"
-                      >
-                        {copiedUrlProjId === p.id ? (
-                          <>
-                            <Check size={11} className="text-emerald-400" />
-                            <span className="text-emerald-400 font-semibold">Copiado! ✓</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy size={11} className="text-neutral-500" />
-                            <span>http://127.0.0.1:{p.port}</span>
-                          </>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={async () => {
+                            const url = `http://127.0.0.1:${p.port}`
+                            await navigator.clipboard.writeText(url)
+                            setCopiedUrlProjId(p.id)
+                            setTimeout(() => setCopiedUrlProjId(null), 2000)
+                          }}
+                          className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white transition-colors text-[11px] font-mono"
+                          title="Copiar URL local de acesso"
+                        >
+                          {copiedUrlProjId === p.id ? (
+                            <>
+                              <Check size={11} className="text-emerald-400" />
+                              <span className="text-emerald-400 font-semibold">Copiado! ✓</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy size={11} className="text-neutral-500" />
+                              <span>http://127.0.0.1:{p.port}</span>
+                            </>
+                          )}
+                        </button>
+                        {p.status === 'running' && (
+                          <button
+                            type="button"
+                            onClick={() => window.api.openExternal(`http://127.0.0.1:${p.port}`)}
+                            className="p-1 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-400 hover:text-cyan-300 transition-colors"
+                            title="Abrir no navegador padrão"
+                          >
+                            <ExternalLink size={12} />
+                          </button>
                         )}
-                      </button>
+                      </div>
                     )}
                     {p.pid && (
                       <span className="font-mono">
@@ -565,6 +623,65 @@ export const Projects: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              {/* Quick Tunnel Ativo neste projeto */}
+              {(() => {
+                const activeTunnel = tunnelStatus?.quick.find((t) => t.projectId === p.id && t.url)
+                if (!activeTunnel || !activeTunnel.url) return null
+                return (
+                  <div className="mt-3 p-3 rounded-xl bg-indigo-950/40 border border-indigo-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                      <Globe size={14} className="text-indigo-400 shrink-0" />
+                      <span className="text-neutral-400 shrink-0">Link Público:</span>
+                      <a
+                        href={activeTunnel.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          window.api.openExternal(activeTunnel.url!)
+                        }}
+                        className="font-mono text-cyan-300 hover:text-cyan-200 underline truncate"
+                        title="Abrir URL pública"
+                      >
+                        {activeTunnel.url}
+                      </a>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(activeTunnel.url!)
+                          toast.success('Link copiado', 'URL do Cloudflare Tunnel copiada.')
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white border border-neutral-700 text-xs flex items-center gap-1.5 transition-colors"
+                      >
+                        <Copy size={12} />
+                        <span>Copiar Link</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => window.api.openExternal(activeTunnel.url!)}
+                        className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-cyan-300 hover:text-cyan-200 border border-neutral-700 text-xs flex items-center gap-1.5 transition-colors"
+                      >
+                        <ExternalLink size={12} />
+                        <span>Abrir</span>
+                      </button>
+                      {activeTunnel.qrDataUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveQrModalTunnel(activeTunnel)}
+                          className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs flex items-center gap-1.5 transition-colors font-medium shadow-sm"
+                        >
+                          <QrCode size={12} />
+                          <span>QR Code</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
 
               {/* Sub-barra de detalhes */}
               <div className="mt-4 pt-3 border-t border-neutral-800/80 flex items-center justify-between text-[11px] text-neutral-400">
@@ -898,7 +1015,24 @@ export const Projects: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div>
+              <div className="flex items-center gap-1.5 mb-1">
+                <label className="text-xs font-semibold text-neutral-300">Porta Preferencial</label>
+                <InfoTooltip
+                  title="Porta Interna da Aplicação"
+                  description="Porta local fixa (ex: 3000, 8080). Se deixada em branco, o MyServer alocará uma porta livre automaticamente no range 3001-3999."
+                  recommendation="Deixe vazio para auto-alocação segura sem conflitos."
+                />
+              </div>
+              <input
+                type="number"
+                value={portInput}
+                onChange={(e) => setPortInput(e.target.value)}
+                placeholder="Automática"
+                className="w-full px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 text-white text-xs font-mono focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
             <div>
               <div className="flex items-center gap-1.5 mb-1">
                 <label className="text-xs font-semibold text-neutral-300">Limite RAM (MB)</label>
@@ -1174,6 +1308,40 @@ export const Projects: React.FC = () => {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Modal de QR Code do Quick Tunnel */}
+      <Modal
+        isOpen={!!activeQrModalTunnel}
+        onClose={() => setActiveQrModalTunnel(null)}
+        title="Acesso Mobile via Quick Tunnel"
+        subtitle={activeQrModalTunnel ? `Escaneie para acessar ${activeQrModalTunnel.label || 'a aplicação'}` : ''}
+        maxWidth="sm"
+      >
+        {activeQrModalTunnel && (
+          <div className="flex flex-col items-center p-4 space-y-4 text-center">
+            <div className="p-3 bg-white rounded-2xl shadow-xl">
+              <img
+                src={activeQrModalTunnel.qrDataUrl || ''}
+                alt="QR Code"
+                className="w-56 h-56 object-contain"
+              />
+            </div>
+            <div className="space-y-1 w-full">
+              <p className="text-xs font-mono text-cyan-400 break-all">{activeQrModalTunnel.url}</p>
+              <p className="text-[11px] text-neutral-400">
+                Disponível de qualquer lugar do mundo com HTTPS automático sem abrir portas no roteador.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveQrModalTunnel(null)}
+              className="w-full py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white text-xs transition-colors"
+            >
+              Fechar
+            </button>
+          </div>
+        )}
       </Modal>
 
       {/* Gaveta de Ajuda / Mini-Documentação In-App */}

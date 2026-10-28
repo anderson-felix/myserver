@@ -22,6 +22,7 @@ import { Modal } from '../components/Modal'
 import { XtermViewer } from '../components/XtermViewer'
 import { HelpDrawer } from '../components/HelpDrawer'
 import { InfoTooltip } from '../components/InfoTooltip'
+import { useToast } from '../components/Toast'
 import type {
   LinuxNode,
   LinuxNodeInput,
@@ -35,6 +36,7 @@ export const LinuxNodes: React.FC = () => {
   const [nodes, setNodes] = useState<LinuxNode[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
+  const toast = useToast()
 
   // Help & Guia
   const [isHelpOpen, setIsHelpOpen] = useState(false)
@@ -111,7 +113,7 @@ export const LinuxNodes: React.FC = () => {
       const t = await window.api.connectLinuxNode(nodeId)
       setTelemetry(t)
     } catch (err) {
-      alert(`Falha ao conectar via SSH: ${(err as Error).message}`)
+      toast.error('Falha ao conectar via SSH', (err as Error).message)
       setTelemetry(null)
     } finally {
       setLoadingTelemetry(false)
@@ -141,26 +143,33 @@ export const LinuxNodes: React.FC = () => {
       setHost('')
       setPassword('')
       setPrivateKey('')
+      toast.success('Nó adicionado com sucesso!', `Conectando a ${created.name}...`)
       await loadData()
       handleConnect(created.id)
     } catch (err) {
-      alert(`Erro ao adicionar nó: ${(err as Error).message}`)
+      toast.error('Erro ao adicionar nó', (err as Error).message)
     } finally {
       setSavingNode(false)
     }
   }
 
   const handleDeleteNode = async (id: string, nodeName: string) => {
-    if (!confirm(`Remover nó remoto '${nodeName}'?`)) return
+    const ok = await toast.confirm(`Remover nó remoto '${nodeName}'?`, {
+      title: 'Remover Nó Remoto',
+      confirmLabel: 'Remover',
+      danger: true
+    })
+    if (!ok) return
     try {
       await window.api.removeLinuxNode(id)
       if (activeNodeId === id) {
         setActiveNodeId(null)
         setTelemetry(null)
       }
+      toast.success('Nó removido com sucesso')
       loadData()
     } catch (err) {
-      alert(`Erro ao remover nó: ${(err as Error).message}`)
+      toast.error('Erro ao remover nó', (err as Error).message)
     }
   }
 
@@ -170,11 +179,11 @@ export const LinuxNodes: React.FC = () => {
     try {
       await window.api.provisionLinuxNode(activeNodeId, provisionOpts)
       setIsProvisionModalOpen(false)
-      alert('Servidor Linux provisionado com sucesso!')
+      toast.success('Servidor Linux provisionado com sucesso!')
       handleConnect(activeNodeId)
       loadData()
     } catch (err) {
-      alert(`Erro durante o provisionamento: ${(err as Error).message}`)
+      toast.error('Erro durante o provisionamento', (err as Error).message)
     } finally {
       setProvisioning(false)
     }
@@ -190,9 +199,10 @@ export const LinuxNodes: React.FC = () => {
       if (action === 'start') await window.api.startLinuxContainer(activeNodeId, containerId)
       else if (action === 'stop') await window.api.stopLinuxContainer(activeNodeId, containerId)
       else if (action === 'restart') await window.api.restartLinuxContainer(activeNodeId, containerId)
+      toast.success('Comando enviado', `Ação ${action} executada com sucesso.`)
       await handleConnect(activeNodeId)
     } catch (err) {
-      alert(`Erro na ação do container: ${(err as Error).message}`)
+      toast.error('Erro na ação do container', (err as Error).message)
     } finally {
       setContainerActionLoading(null)
     }
@@ -213,7 +223,7 @@ export const LinuxNodes: React.FC = () => {
         }))
       setViewingContainer({ id: containerId, name, logs: parsedLogs })
     } catch (err) {
-      alert(`Falha ao ler logs do container: ${(err as Error).message}`)
+      toast.error('Falha ao ler logs do container', (err as Error).message)
     }
   }
 
@@ -224,11 +234,11 @@ export const LinuxNodes: React.FC = () => {
     try {
       await window.api.deployLinuxContainer(activeNodeId, selectedProjectId)
       setIsDeployModalOpen(false)
-      alert('Container implantado no servidor Linux remoto!')
+      toast.success('Container implantado no servidor Linux remoto!')
       handleConnect(activeNodeId)
       loadData()
     } catch (err) {
-      alert(`Erro no deploy remoto: ${(err as Error).message}`)
+      toast.error('Erro no deploy remoto', (err as Error).message)
     } finally {
       setDeploying(false)
     }
